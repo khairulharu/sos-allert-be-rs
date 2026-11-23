@@ -1,0 +1,56 @@
+# AGENTS.md
+
+Rust port of the Go service `khairulharu/sos-allert-be`. The Go repo is the
+contract: when behaviour is unclear, read it (`internal/usecase`,
+`internal/delivery/http/route/route.go`, `db/migrations`) instead of guessing.
+
+## Commands
+
+```bash
+cargo run --bin web                  # :3000
+cargo run --bin web -- migrate       # apply migrations; explicit, never on boot
+cargo run --bin worker               # kafka consumers (phase 5)
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+```
+
+## Rules
+
+- Work on a branch, open a PR, never push to `main`.
+- Migrations are DDL: never run them against a live database without the
+  user's approval card. Never edit an applied migration; add a new one with the
+  next version.
+- Never commit `config.json`, `ca.pem`, `*.p8`, or any key. `config.json.example`
+  holds the full key set and stays in sync when keys change.
+- Do not disable or skip a failing test to make CI green.
+
+## Contract details that are easy to get wrong
+
+- Timestamps are millisecond `bigint` everywhere (Go `autoCreateTime:milli`).
+- `Authorization` is the raw token. No `Bearer` prefix. `401` for an unknown
+  token, `503` when the session store errors so clients keep their token.
+- Sessions: `auth:token:<token>` -> user id, `auth:user:<user_id>` -> token,
+  both with `auth.token_ttl_hours`. Login replaces the old token (single
+  session). Logout deletes both and publishes `auth:session_invalidate`.
+- Redis GEO key `users:locations` takes **longitude before latitude**.
+  `users:last_seen` drives the >2 min stale filter; read it with one `HMGET`
+  per candidate set, never one call per candidate.
+- Alert statuses: `TRIGGERED`, `ACKNOWLEDGED`, `RESOLVED`, `CANCELLED`,
+  `EXPIRED`. Expiry only flips status; there is no `expired_at`.
+- `alerts.severity = NULL` means never classified; `0` is a real score.
+- Grace-period outbox is at-least-once: crash after send, before mark, re-sends.
+  Losing an SOS is worse than a duplicate.
+- Fan-out is fail-open after the alert row is persisted: a recipient-lookup
+  error yields an empty list, `recipients_notified: 0`, and still runs the
+  notifier. Only an alert-persist failure is a 5xx.
+
+## Tests
+
+- Unit tests live in `src/<module>/tests.rs`, declared with
+  `#[cfg(test)] mod tests;`, so logic files carry no test code.
+- Cross-module and HTTP-level tests live in `tests/`.
+- Tests that need Postgres/Redis are gated by env vars and skipped when unset;
+  the default `cargo test` runs with no infrastructure.
+- Port a Go test when porting its behaviour, not after. `*_test.go` in the Go
+  repo is the expected-coverage checklist.

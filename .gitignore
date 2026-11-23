@@ -1,0 +1,8 @@
+target/
+/config.json
+/ca.pem
+/uploads/
+*.p8
+AuthKey*.p8
+.env
+.DS_Store
