@@ -135,7 +135,7 @@ because it compiles.
   4), Kafka fan-out (phase 5). The use case already takes a `Notifier` and a
   `TrackHub` port, so both plug in without touching the trigger.
 
-### 4. Media and notifications (partial: media + FCM/APNs/Twilio done)
+### 4. Media and notifications (done)
 
 - `POST /api/sos/:alertId/media` (multipart, ≤25 MB, local storage backend),
   media list/get, escalation when triage widens the radius.
@@ -160,8 +160,21 @@ because it compiles.
   * Twilio: form POST with basic auth, `To`/`From`/`Body`.
   * Unconfigured channels are log-only, never an error; only push-failed **and**
     SMS-failed returns an error, so the worker retries or dead-letters.
-- Remaining in this phase: VAPID Web Push (needs the subscription table's
-  crypto) and the FCM/APNs token registration endpoints (`/api/push/*`).
+- Done: browser Web Push (VAPID) and the subscription endpoints.
+  * `GET /api/push/vapid-public-key` (`503` when the channel is off),
+    `GET/POST/DELETE /api/push/subscriptions`.
+  * an endpoint belongs to the browser that registered it first: a re-subscribe
+    refreshes the row and keeps its id, another user gets `409`.
+  * stored endpoints must be `https` on an allowlisted push service, checked
+    again at send time so an old row cannot become an SSRF target; a
+    non-allowlisted row is deleted instead of POSTed to.
+  * the encrypted payload (RFC 8291, `aes128gcm`) and the VAPID JWT come from
+    the `web-push` crate; the HTTP send is behind a `PushTransport` port so
+    tests assert the endpoint, headers and ciphertext without a live service.
+  * `404`/`410` from the push service deletes the subscription.
+- FCM/APNs device tokens were already settable through
+  `PATCH /api/users/_current` (`fcm_token`, `apns_token`), so no extra endpoint
+  was needed.
 
 ### 5. Kafka worker (done)
 

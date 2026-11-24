@@ -27,6 +27,7 @@ pub mod health;
 pub mod idempotency;
 pub mod location_cache;
 pub mod location_repository;
+pub mod push_subscription_repository;
 pub mod rate_limit;
 pub mod redis_conn;
 pub mod session;

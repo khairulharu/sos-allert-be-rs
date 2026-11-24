@@ -16,12 +16,15 @@ use crate::usecase::auth::UserStore;
 use crate::usecase::emergency::{EmergencyContactStore, MAX_EMERGENCY_CONTACTS_PER_USER};
 use crate::usecase::sos::SosNotifier;
 
-use super::{ApnsNotifier, FcmNotifier, ProviderError, TwilioNotifier};
+use super::{ApnsNotifier, FcmNotifier, ProviderError, TwilioNotifier, WebPushNotifier};
 
 pub struct AlertDispatcher {
     pub fcm: Option<FcmNotifier>,
     pub apns: Option<ApnsNotifier>,
     pub twilio: Option<TwilioNotifier>,
+    /// Browser Web Push; `Arc` because the notifier owns a transport and
+    /// subscription store and is not cloned per send.
+    pub web: Option<Arc<WebPushNotifier>>,
     pub tokens: Option<Arc<dyn UserStore>>,
     pub contacts: Option<Arc<dyn EmergencyContactStore>>,
 }
@@ -135,6 +138,21 @@ impl AlertDispatcher {
                     Err(e) => {
                         failed = true;
                         tracing::error!(error = %e, recipient_id, "APNs delivery failed")
+                    }
+                }
+            }
+
+            if let Some(web) = &self.web {
+                attempted = true;
+                match web.send_to_user(recipient_id, &title, &body, &data).await {
+                    Ok(()) => {}
+                    Err(ProviderError::NotConfigured) => tracing::info!(
+                        alert_id = %notice.alert_id,
+                        "web push not configured, log-only"
+                    ),
+                    Err(e) => {
+                        failed = true;
+                        tracing::error!(error = %e, recipient_id, "web push delivery failed")
                     }
                 }
             }
