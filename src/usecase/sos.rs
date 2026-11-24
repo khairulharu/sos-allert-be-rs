@@ -20,15 +20,17 @@ use async_trait::async_trait;
 use uuid::Uuid;
 use validator::Validate;
 
-use crate::domain::{Alert, AlertBreadcrumb, AlertResponse, User};
+use crate::domain::{Alert, AlertBreadcrumb, AlertMedia, AlertResponse, User};
 use crate::error::{AppError, AppResult};
 use crate::geo::{mask_coordinates, quantize_distance_meters};
 use crate::model::sos::{
-    responder_metrics, AlertDetailResponse, AlertRespondedCounts, AlertStatusCounts,
-    AlertSummaryResponse, BreadcrumbRequest, BreadcrumbResponse, CancelSosRequest,
-    CancelSosResponse, LocationPoint, RespondSosRequest, RespondSosResponse, ResponderSummary,
-    SearchAlertHistoryRequest, SenderSummary, SosCreatedResponse, TriageInfo, TriggerSosRequest,
+    responder_metrics, AlertDetailResponse, AlertMediaResponse, AlertRespondedCounts,
+    AlertStatusCounts, AlertSummaryResponse, BreadcrumbRequest, BreadcrumbResponse,
+    CancelSosRequest, CancelSosResponse, LocationPoint, RespondSosRequest, RespondSosResponse,
+    ResponderSummary, SearchAlertHistoryRequest, SenderSummary, SosCreatedResponse, TriageInfo,
+    TriggerSosRequest,
 };
+use crate::storage::MediaStorage;
 use crate::usecase::auth::UserStore;
 use crate::usecase::triage::{radius_start_index, Triage};
 
@@ -38,6 +40,8 @@ pub const BREADCRUMB_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 pub const BREADCRUMB_FUTURE_SKEW_MS: i64 = 60 * 1000;
 pub const MAX_HISTORY_PAGE: i64 = 100_000;
 pub const ACTIVE_LIST_LIMIT: i64 = 20;
+/// Upload limit for incident media.
+pub const MAX_MEDIA_BYTES: usize = 50 << 20;
 
 /// Fields a transition may set. `None` leaves the column untouched.
 #[derive(Debug, Clone, Default)]
@@ -103,6 +107,16 @@ pub trait AlertStore: Send + Sync {
         emergency_type: &str,
         severity: Option<f64>,
         summary: &str,
+    ) -> AppResult<()>;
+    async fn create_media(&self, media: &AlertMedia) -> AppResult<()>;
+    async fn list_media(&self, alert_id: &str) -> AppResult<Vec<AlertMedia>>;
+    async fn get_media(&self, alert_id: &str, media_id: &str) -> AppResult<Option<AlertMedia>>;
+    async fn set_media_transcription(
+        &self,
+        media_id: &str,
+        transcript: Option<&str>,
+        status: &str,
+        transcribed_at: Option<i64>,
     ) -> AppResult<()>;
 }
 
@@ -202,6 +216,7 @@ pub struct SosUseCase {
     users: Option<Arc<dyn UserStore>>,
     hub: Arc<dyn TrackHub>,
     triage: Option<Arc<dyn Triage>>,
+    storage: Option<Arc<dyn MediaStorage>>,
     settings: SosSettings,
     now_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
@@ -217,6 +232,7 @@ impl SosUseCase {
             users: None,
             hub: Arc::new(NoopHub),
             triage: None,
+            storage: None,
             settings,
             now_millis: Arc::new(crate::usecase::auth::default_now_millis),
         }
@@ -256,6 +272,12 @@ impl SosUseCase {
     /// and no triage is invented.
     pub fn with_triage(mut self, triage: Arc<dyn Triage>) -> Self {
         self.triage = Some(triage);
+        self
+    }
+
+    /// Optional media backend; without it uploads answer `412`.
+    pub fn with_storage(mut self, storage: Arc<dyn MediaStorage>) -> Self {
+        self.storage = Some(storage);
         self
     }
 
@@ -1174,6 +1196,104 @@ impl SosUseCase {
         Ok(())
     }
 
+    // ------------------------------------------------------------------ media
+
+    /// `POST /api/sos/{alertId}/media`. Sender only, active alert only,
+    /// audio or video only, at most 50 MB.
+    pub async fn upload_media(
+        &self,
+        sender_id: &str,
+        alert_id: &str,
+        filename: &str,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> AppResult<AlertMediaResponse> {
+        let alert = self
+            .alerts
+            .get_by_id(alert_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("alert not found".into()))?;
+        if alert.sender_id != sender_id {
+            return Err(AppError::Forbidden(
+                "only the alert sender can perform this action".into(),
+            ));
+        }
+        if !crate::domain::alert::status::is_active(&alert.status) {
+            return Err(AppError::Conflict("invalid alert status transition".into()));
+        }
+        if !content_type.starts_with("audio/") && !content_type.starts_with("video/") {
+            return Err(AppError::BadRequest(
+                "media must be audio/* or video/*".into(),
+            ));
+        }
+        if bytes.len() > MAX_MEDIA_BYTES {
+            return Err(AppError::BadRequest("media exceeds 50 MB".into()));
+        }
+        let filename = sanitize_filename(filename)?;
+
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| AppError::Precondition("media storage is not configured".into()))?;
+
+        let stored_name = format!("{alert_id}_{}_{}", Uuid::new_v4(), filename);
+        let path = storage.save(&stored_name, bytes).await?;
+
+        let media = AlertMedia {
+            id: Uuid::new_v4().to_string(),
+            alert_id: alert_id.to_owned(),
+            filename: filename.clone(),
+            content_type: content_type.to_owned(),
+            size_bytes: bytes.len() as i64,
+            storage_path: path.clone(),
+            uploaded_by: sender_id.to_owned(),
+            uploaded_at: (self.now_millis)(),
+            transcript: None,
+            // STT is not ported yet.
+            transcription_status: "disabled".into(),
+            transcribed_at: None,
+        };
+
+        if let Err(e) = self.alerts.create_media(&media).await {
+            // Undo the file: a row-less blob would never be reachable.
+            let _ = storage.delete(&path).await;
+            return Err(e);
+        }
+
+        Ok(media_response(&media))
+    }
+
+    pub async fn list_media(
+        &self,
+        requester: &str,
+        alert_id: &str,
+    ) -> AppResult<Vec<AlertMediaResponse>> {
+        self.authorize_tracking(requester, alert_id).await?;
+        let rows = self.alerts.list_media(alert_id).await?;
+        Ok(rows.iter().map(media_response).collect())
+    }
+
+    /// Metadata plus bytes for the authenticated download path.
+    pub async fn open_media(
+        &self,
+        requester: &str,
+        alert_id: &str,
+        media_id: &str,
+    ) -> AppResult<(AlertMedia, Vec<u8>)> {
+        self.authorize_tracking(requester, alert_id).await?;
+        let media = self
+            .alerts
+            .get_media(alert_id, media_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("media not found".into()))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| AppError::Precondition("media storage is not configured".into()))?;
+        let bytes = storage.open(&media.storage_path).await?;
+        Ok((media, bytes))
+    }
+
     // ------------------------------------------------------------- background
 
     /// Durable grace-period outbox: dispatch alerts whose due time passed and
@@ -1409,5 +1529,66 @@ fn status_counts(counts: &HashMap<String, i64>) -> AlertStatusCounts {
         resolved: get(crate::domain::alert::status::RESOLVED),
         cancelled: get(crate::domain::alert::status::CANCELLED),
         expired: get(crate::domain::alert::status::EXPIRED),
+    }
+}
+
+fn media_response(media: &AlertMedia) -> AlertMediaResponse {
+    let status = if media.transcription_status.is_empty() {
+        "disabled".to_string()
+    } else {
+        media.transcription_status.clone()
+    };
+    AlertMediaResponse {
+        id: media.id.clone(),
+        alert_id: media.alert_id.clone(),
+        filename: media.filename.clone(),
+        content_type: media.content_type.clone(),
+        size_bytes: media.size_bytes,
+        uploaded_at: media.uploaded_at,
+        url: format!("/api/sos/{}/media/{}", media.alert_id, media.id),
+        transcript: media.transcript.clone().unwrap_or_default(),
+        transcription_status: status,
+        transcribed_at: media.transcribed_at,
+    }
+}
+
+/// Turn an untrusted multipart filename into a safe base name: drop control
+/// characters and directories, collapse "..", keep the extension, truncate to
+/// 200 characters (the column is VARCHAR(255)).
+pub fn sanitize_filename(name: &str) -> AppResult<String> {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !c.is_control() && *c != '\0')
+        .collect();
+    let base = cleaned
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&cleaned)
+        .to_string();
+    let mut base = base;
+    while base.contains("..") {
+        base = base.replace("..", ".");
+    }
+    let base = base.trim().to_string();
+    if base.is_empty() || base == "." {
+        return Err(AppError::BadRequest("Bad Request".into()));
+    }
+
+    let chars: Vec<char> = base.chars().collect();
+    if chars.len() <= 200 {
+        return Ok(base);
+    }
+    match base.rfind('.') {
+        Some(index) => {
+            let ext: Vec<char> = base[index..].chars().collect();
+            if ext.len() > 1 && ext.len() <= 16 {
+                let keep = 200 - ext.len();
+                let head: String = chars[..keep].iter().collect();
+                Ok(format!("{head}{}", &base[index..]))
+            } else {
+                Ok(chars[..200].iter().collect())
+            }
+        }
+        None => Ok(chars[..200].iter().collect()),
     }
 }

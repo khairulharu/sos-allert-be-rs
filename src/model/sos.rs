@@ -301,3 +301,21 @@ pub fn responder_metrics(
     let distance = distance_meters(victim_lat, victim_lon, responder_lat, responder_lon);
     (distance, estimate_eta_seconds(distance) as i64)
 }
+
+/// One stored incident upload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertMediaResponse {
+    pub id: String,
+    pub alert_id: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub uploaded_at: i64,
+    /// Authenticated download path (`GET`, `Authorization` header).
+    pub url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub transcript: String,
+    pub transcription_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcribed_at: Option<i64>,
+}

@@ -19,6 +19,7 @@ use crate::repository::rate_limit::RedisRateLimitRepository;
 use crate::repository::redis_conn::RedisHandle;
 use crate::repository::session::{run_invalidation, CachedSessionStore, RedisSessionStore};
 use crate::repository::user_repository::PgUserRepository;
+use crate::storage::LocalStorage;
 use crate::tracking::Hub;
 use crate::usecase::address::AddressUseCase;
 use crate::usecase::auth::{AuthUseCase, SessionStore};
@@ -184,7 +185,10 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         .with_idempotency(Arc::new(RedisIdempotencyRepository::new(redis.clone())))
         .with_rate_limiter(Arc::new(RedisRateLimitRepository::new(redis.clone())))
         .with_users(Arc::new(PgUserRepository::new(db.clone())))
-        .with_hub(hub.clone() as Arc<dyn crate::usecase::sos::TrackHub>);
+        .with_hub(hub.clone() as Arc<dyn crate::usecase::sos::TrackHub>)
+        .with_storage(Arc::new(LocalStorage::new(
+            config.storage.local_dir.clone(),
+        )));
 
     // AI triage: only the deterministic offline classifier is ported so far.
     // A configured remote provider still gets offline classification instead

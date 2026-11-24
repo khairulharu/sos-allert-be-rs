@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::domain::{Alert, AlertBreadcrumb, AlertResponse, LocationCache, User};
+use crate::domain::{Alert, AlertBreadcrumb, AlertMedia, AlertResponse, LocationCache, User};
 use crate::error::{AppError, AppResult};
 use crate::model::sos::{
     BreadcrumbRequest, CancelSosRequest, RespondSosRequest, SearchAlertHistoryRequest,
@@ -30,6 +30,7 @@ struct FakeAlerts {
     recipients: Mutex<HashMap<String, Vec<String>>>,
     breadcrumbs: Mutex<Vec<AlertBreadcrumb>>,
     responses: Mutex<Vec<AlertResponse>>,
+    media: Mutex<Vec<AlertMedia>>,
 }
 
 impl FakeAlerts {
@@ -379,6 +380,50 @@ impl AlertStore for FakeAlerts {
                 });
         }
         Ok(out)
+    }
+
+    async fn create_media(&self, media: &AlertMedia) -> AppResult<()> {
+        self.media.lock().unwrap().push(media.clone());
+        Ok(())
+    }
+
+    async fn list_media(&self, alert_id: &str) -> AppResult<Vec<AlertMedia>> {
+        Ok(self
+            .media
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|media| media.alert_id == alert_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn get_media(&self, alert_id: &str, media_id: &str) -> AppResult<Option<AlertMedia>> {
+        Ok(self
+            .media
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|media| media.alert_id == alert_id && media.id == media_id)
+            .cloned())
+    }
+
+    async fn set_media_transcription(
+        &self,
+        media_id: &str,
+        transcript: Option<&str>,
+        status: &str,
+        transcribed_at: Option<i64>,
+    ) -> AppResult<()> {
+        let mut media = self.media.lock().unwrap();
+        if let Some(row) = media.iter_mut().find(|row| row.id == media_id) {
+            if let Some(text) = transcript {
+                row.transcript = Some(text.to_owned());
+            }
+            row.transcription_status = status.to_owned();
+            row.transcribed_at = transcribed_at;
+        }
+        Ok(())
     }
 
     async fn update_triage(
@@ -1502,4 +1547,25 @@ async fn no_description_means_no_triage() {
         .unwrap();
     assert!(alert.severity.is_none());
     assert_eq!(alert.emergency_type, "DANGER");
+}
+
+#[test]
+fn media_filenames_are_sanitized_like_go() {
+    use crate::usecase::sos::sanitize_filename;
+
+    assert_eq!(sanitize_filename("cry.wav").unwrap(), "cry.wav");
+    // Directory components are dropped.
+    assert_eq!(sanitize_filename("../../etc/passwd").unwrap(), "passwd");
+    assert_eq!(sanitize_filename("C:\\temp\\cry.wav").unwrap(), "cry.wav");
+    // Control characters removed.
+    assert_eq!(sanitize_filename("cr\u{0}y.wav").unwrap(), "cry.wav");
+    // Nothing usable left.
+    assert!(sanitize_filename("").is_err());
+    assert!(sanitize_filename("..").is_err());
+
+    // Long names keep their extension.
+    let long = format!("{}.wav", "a".repeat(400));
+    let sanitized = sanitize_filename(&long).unwrap();
+    assert_eq!(sanitized.chars().count(), 200);
+    assert!(sanitized.ends_with(".wav"), "got {sanitized}");
 }

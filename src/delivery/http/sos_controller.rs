@@ -1,7 +1,8 @@
 //! SOS endpoints.
 
+use axum::extract::multipart::MultipartRejection;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
-use axum::extract::{Json, Path, Query, State};
+use axum::extract::{Json, Multipart, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
@@ -10,8 +11,8 @@ use serde::Deserialize;
 use crate::bootstrap::AppState;
 use crate::error::{AppError, AppResult};
 use crate::model::sos::{
-    AlertDetailResponse, AlertSummaryResponse, BreadcrumbRequest, BreadcrumbResponse,
-    CancelSosRequest, CancelSosResponse, RespondSosRequest, RespondSosResponse,
+    AlertDetailResponse, AlertMediaResponse, AlertSummaryResponse, BreadcrumbRequest,
+    BreadcrumbResponse, CancelSosRequest, CancelSosResponse, RespondSosRequest, RespondSosResponse,
     SearchAlertHistoryRequest, TriggerSosRequest,
 };
 use crate::model::{Auth, PageMetadata, WebResponse};
@@ -192,4 +193,78 @@ pub async fn list_breadcrumbs(
 ) -> AppResult<Json<WebResponse<Vec<BreadcrumbResponse>>>> {
     let crumbs = state.sos().list_breadcrumbs(&auth.id, &alert_id).await?;
     Ok(Json(WebResponse::ok(crumbs)))
+}
+
+/// `POST /api/sos/{alertId}/media` (multipart, field name `file`).
+pub async fn upload_media(
+    State(state): State<AppState>,
+    Extension(auth): Extension<Auth>,
+    Path(alert_id): Path<String>,
+    multipart: Result<Multipart, MultipartRejection>,
+) -> AppResult<Json<WebResponse<AlertMediaResponse>>> {
+    let mut multipart = multipart.map_err(|_| AppError::BadRequest("Bad Request".into()))?;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| AppError::BadRequest("Bad Request".into()))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+
+        let filename = field.file_name().unwrap_or("upload.bin").to_owned();
+        let content_type = field
+            .content_type()
+            .unwrap_or("application/octet-stream")
+            .to_owned();
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|_| AppError::BadRequest("Bad Request".into()))?;
+
+        let media = state
+            .sos()
+            .upload_media(&auth.id, &alert_id, &filename, &content_type, &bytes)
+            .await?;
+        return Ok(Json(WebResponse::ok(media)));
+    }
+
+    Err(AppError::BadRequest(
+        "multipart field 'file' is required".into(),
+    ))
+}
+
+pub async fn list_media(
+    State(state): State<AppState>,
+    Extension(auth): Extension<Auth>,
+    Path(alert_id): Path<String>,
+) -> AppResult<Json<WebResponse<Vec<AlertMediaResponse>>>> {
+    let rows = state.sos().list_media(&auth.id, &alert_id).await?;
+    Ok(Json(WebResponse::ok(rows)))
+}
+
+/// Authenticated download: bytes plus the stored content type.
+pub async fn download_media(
+    State(state): State<AppState>,
+    Extension(auth): Extension<Auth>,
+    Path((alert_id, media_id)): Path<(String, String)>,
+) -> AppResult<Response> {
+    let (media, bytes) = state
+        .sos()
+        .open_media(&auth.id, &alert_id, &media_id)
+        .await?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            ("content-type", media.content_type.clone()),
+            (
+                "content-disposition",
+                format!("inline; filename=\"{}\"", media.filename),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }

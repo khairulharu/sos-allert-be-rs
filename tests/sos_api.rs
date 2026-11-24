@@ -538,3 +538,150 @@ async fn description_triage_is_returned_and_persisted() {
 
     delete_user(&h.state, &sender).await;
 }
+
+/// Minimal multipart body: one field named `file`.
+fn multipart_body(boundary: &str, filename: &str, content_type: &str, payload: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(payload);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+async fn raw_request(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    token: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> (u16, Vec<u8>) {
+    let request = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", token)
+        .header("content-type", content_type)
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    let response = tower::ServiceExt::oneshot(app.clone(), request)
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, bytes)
+}
+
+#[tokio::test]
+async fn media_upload_list_and_download() {
+    let Some(h) = harness_custom(|cfg| {
+        cfg.sos.grace_period_seconds = 0;
+        cfg.storage.local_dir = format!("/tmp/opencode/media-{}", uuid::Uuid::new_v4());
+    })
+    .await
+    else {
+        return;
+    };
+    let sender = unique_id("rs-media");
+    let responder = unique_id("rs-media-r");
+    let token = signup_and_login(&h.app, &sender, "p").await;
+    let responder_token = signup_and_login(&h.app, &responder, "p").await;
+    let (lon, lat) = unique_area();
+    heartbeat(&h.app, &responder_token, lon + 0.001, lat + 0.001).await;
+
+    let (status, body) = send(
+        &h.app,
+        "POST",
+        "/api/sos",
+        Some(&token),
+        Some(serde_json::json!({"longitude": lon, "latitude": lat})),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let alert_id = body["data"]["alert_id"].as_str().unwrap().to_owned();
+
+    // Non-audio is rejected.
+    let boundary = "----rsboundary";
+    let (status, body) = raw_request(
+        &h.app,
+        "POST",
+        &format!("/api/sos/{alert_id}/media"),
+        &token,
+        &format!("multipart/form-data; boundary={boundary}"),
+        multipart_body(boundary, "notes.txt", "text/plain", b"hello"),
+    )
+    .await;
+    assert_eq!(status, 400, "{}", String::from_utf8_lossy(&body));
+
+    // A small audio clip is accepted.
+    let payload = b"RIFFfakewavdata".to_vec();
+    let (status, body) = raw_request(
+        &h.app,
+        "POST",
+        &format!("/api/sos/{alert_id}/media"),
+        &token,
+        &format!("multipart/form-data; boundary={boundary}"),
+        multipart_body(boundary, "cry.wav", "audio/wav", &payload),
+    )
+    .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let media: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let media_id = media["data"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(media["data"]["content_type"], "audio/wav");
+    assert_eq!(media["data"]["size_bytes"], payload.len());
+    assert_eq!(media["data"]["transcription_status"], "disabled");
+    assert_eq!(
+        media["data"]["url"],
+        format!("/api/sos/{alert_id}/media/{media_id}")
+    );
+
+    // The responder (a recipient) can list and download it.
+    let (status, body) = send(
+        &h.app,
+        "GET",
+        &format!("/api/sos/{alert_id}/media"),
+        Some(&responder_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+
+    let (status, bytes) = raw_request(
+        &h.app,
+        "GET",
+        &format!("/api/sos/{alert_id}/media/{media_id}"),
+        &responder_token,
+        "application/json",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(bytes, payload, "downloaded bytes differ from the upload");
+
+    // A stranger cannot read it. Media uses AuthorizeTracking, which answers
+    // 403 (not the 404 the detail endpoint uses) — same as the Go service.
+    let stranger = unique_id("rs-media-x");
+    let stranger_token = signup_and_login(&h.app, &stranger, "p").await;
+    let (status, _) = send(
+        &h.app,
+        "GET",
+        &format!("/api/sos/{alert_id}/media"),
+        Some(&stranger_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403);
+
+    delete_user(&h.state, &sender).await;
+    delete_user(&h.state, &responder).await;
+    delete_user(&h.state, &stranger).await;
+}

@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
 
-use crate::domain::{Alert, AlertBreadcrumb, AlertResponse};
+use crate::domain::{Alert, AlertBreadcrumb, AlertMedia, AlertResponse};
 use crate::error::{AppError, AppResult};
 use crate::model::sos::{ResponderSummary, SearchAlertHistoryRequest};
 use crate::usecase::sos::{AlertStore, AlertUpdate};
@@ -529,4 +529,72 @@ impl AlertStore for PgAlertRepository {
         .await?;
         Ok(())
     }
+
+    async fn create_media(&self, media: &AlertMedia) -> AppResult<()> {
+        sqlx::query(
+            "INSERT INTO alert_media \
+                (id, alert_id, filename, content_type, size_bytes, storage_path, uploaded_by, \
+                 uploaded_at, transcript, transcription_status, transcribed_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(&media.id)
+        .bind(&media.alert_id)
+        .bind(&media.filename)
+        .bind(&media.content_type)
+        .bind(media.size_bytes)
+        .bind(&media.storage_path)
+        .bind(&media.uploaded_by)
+        .bind(media.uploaded_at)
+        .bind(&media.transcript)
+        .bind(&media.transcription_status)
+        .bind(media.transcribed_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_media(&self, alert_id: &str) -> AppResult<Vec<AlertMedia>> {
+        let rows = sqlx::query_as::<_, AlertMedia>(&format!(
+            "SELECT {MEDIA_COLUMNS} FROM alert_media WHERE alert_id = $1 ORDER BY uploaded_at ASC"
+        ))
+        .bind(alert_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn get_media(&self, alert_id: &str, media_id: &str) -> AppResult<Option<AlertMedia>> {
+        let row = sqlx::query_as::<_, AlertMedia>(&format!(
+            "SELECT {MEDIA_COLUMNS} FROM alert_media WHERE id = $1 AND alert_id = $2"
+        ))
+        .bind(media_id)
+        .bind(alert_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn set_media_transcription(
+        &self,
+        media_id: &str,
+        transcript: Option<&str>,
+        status: &str,
+        transcribed_at: Option<i64>,
+    ) -> AppResult<()> {
+        sqlx::query(
+            "UPDATE alert_media SET transcript = COALESCE($2, transcript), \
+                 transcription_status = $3, transcribed_at = COALESCE($4, transcribed_at) \
+             WHERE id = $1",
+        )
+        .bind(media_id)
+        .bind(transcript)
+        .bind(status)
+        .bind(transcribed_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
+
+const MEDIA_COLUMNS: &str = "id, alert_id, filename, content_type, size_bytes, storage_path, \
+     uploaded_by, uploaded_at, transcript, transcription_status, transcribed_at";

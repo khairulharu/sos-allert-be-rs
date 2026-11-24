@@ -6,7 +6,7 @@
 //! axum 0.8 path syntax is used (`{contactId}`), which is the same placeholder
 //! set Fiber spelled `:contactId`.
 
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::middleware as axum_mw;
 use axum::response::{IntoResponse, Response};
@@ -76,6 +76,17 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/sos/{alertId}/resolve", post(sos_controller::resolve))
         .route("/api/sos/{alertId}/respond", post(sos_controller::respond))
+        .route(
+            "/api/sos/{alertId}/media",
+            get(sos_controller::list_media)
+                .post(sos_controller::upload_media)
+                // Incident uploads are up to 50 MB; axum's default is 2 MB.
+                .layer(DefaultBodyLimit::max(50 << 20)),
+        )
+        .route(
+            "/api/sos/{alertId}/media/{mediaId}",
+            get(sos_controller::download_media),
+        )
         .route(
             "/api/sos/{alertId}/breadcrumbs",
             get(sos_controller::list_breadcrumbs).post(sos_controller::add_breadcrumb),

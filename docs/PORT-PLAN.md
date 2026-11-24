@@ -133,14 +133,21 @@ because it compiles.
   4), Kafka fan-out (phase 5). The use case already takes a `Notifier` and a
   `TrackHub` port, so both plug in without touching the trigger.
 
-### 4. Media and notifications
+### 4. Media and notifications (partial: media done)
 
 - `POST /api/sos/:alertId/media` (multipart, ≤25 MB, local storage backend),
   media list/get, escalation when triage widens the radius.
 - Web Push (VAPID) subscribe/unsubscribe + allowed-host SSRF guard; FCM, APNs,
   Twilio SMS; `NotifyRecipients` push-only path.
-- Acceptance: notifier tests with a fake HTTP transport (no live push service),
-  push subscription repository tests env-gated.
+- Done: `POST /api/sos/{alertId}/media` (multipart field `file`, audio/* or
+  video/* only, 50 MB cap, sender only, active alert only), list for
+  participants, authenticated download with the stored content type. Files go
+  to `storage.local_dir`; a failed metadata insert deletes the file again, and
+  a stored path cannot escape the storage root. Filename sanitizing follows the
+  Go rules (tested).
+- Remaining: VAPID Web Push, FCM, APNs, Twilio SMS and the responder-roster
+  notification path. `SosNotifier` is already a port, so the fan-out does not
+  change when they land.
 
 ### 5. Kafka worker
 
