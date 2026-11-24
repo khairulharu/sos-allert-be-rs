@@ -86,6 +86,13 @@ and continues instead of failing the trigger. APNs reads
 `403 TooManyProviderTokenUpdates`. Provider request shapes are asserted against
 a local mock server in `src/gateway/notify/tests.rs`.
 
+## HTTP middleware
+
+The router applies, outermost first: panic guard, the two helmet headers, CORS,
+a 50 MB body limit. CORS is locked to `https://allert.my.id` and
+`http://localhost:5173`; a new client origin must be added there (same list as
+the Go service).
+
 ## Metrics
 
 `/metrics` is registered only when `metrics.token` is non-empty, and the token

@@ -347,6 +347,9 @@ async fn run_sos_loops(
     let housekeeping_every = poll.max(Duration::from_secs(60));
     let mut dispatch = tokio::time::interval(poll);
     let mut housekeeping = tokio::time::interval(housekeeping_every);
+    // Go refreshes the active-incident gauge every 30 s, independently of
+    // housekeeping.
+    let mut gauge = tokio::time::interval(Duration::from_secs(30));
     // The first housekeeping pass runs immediately, like the Go service.
     dispatch.tick().await;
 
@@ -364,6 +367,8 @@ async fn run_sos_loops(
                 if let Err(e) = sos.housekeeping().await {
                     tracing::warn!(error = %e, "housekeeping failed");
                 }
+            }
+            _ = gauge.tick() => {
                 if let Err(e) = sos.refresh_active_gauge().await {
                     tracing::warn!(error = %e, "active SOS gauge refresh failed");
                 }

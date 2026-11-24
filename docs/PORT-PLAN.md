@@ -246,6 +246,16 @@ because it compiles.
 - Write `docs/CUTOVER.md`: MySQL -> Postgres data move, session invalidation,
   and the fact that deploying the session change logs everyone out.
 
+## HTTP middleware parity
+
+Ported from the Go Fiber setup: a 50 MB body limit on every route (not just
+media), CORS limited to `https://allert.my.id` + `http://localhost:5173` with
+the raw `Authorization` and `X-Idempotency-Key` headers allowed and
+`Content-Disposition` exposed, `X-Frame-Options: DENY`,
+`Cross-Origin-Resource-Policy: cross-origin`, and a panic guard. The active-SOS
+gauge refreshes every 30 s, independently of housekeeping, like
+`RunActiveSOSGauge`.
+
 ## Observability
 
 Ported from `internal/metrics`: a dependency-free Prometheus exposition with

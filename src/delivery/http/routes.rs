@@ -13,6 +13,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::json;
+use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::bootstrap::AppState;
 use crate::delivery::http::middleware::auth::require_auth;
@@ -137,6 +140,51 @@ pub fn router(state: AppState) -> Router {
         .merge(guest)
         .merge(authed)
         .with_state(state)
+        // Parity with the Go Fiber app: a 50 MB body limit, CORS limited to
+        // the production site and the Vite dev origin (the browser sends the
+        // raw Authorization header and X-Idempotency-Key), the two helmet
+        // headers, and a panic guard so one bad handler cannot drop a socket.
+        .layer(DefaultBodyLimit::max(50 << 20))
+        .layer(cors_layer())
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::X_FRAME_OPTIONS,
+            axum::http::HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::HeaderName::from_static("cross-origin-resource-policy"),
+            axum::http::HeaderValue::from_static("cross-origin"),
+        ))
+        .layer(CatchPanicLayer::new())
+}
+
+/// Production origin plus the Vite dev server, same allowlist as the Go
+/// service. No credentials: sessions travel in the Authorization header.
+fn cors_layer() -> CorsLayer {
+    use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE, ORIGIN};
+    use axum::http::Method;
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list([
+            "https://allert.my.id".parse().expect("origin"),
+            "http://localhost:5173".parse().expect("origin"),
+        ]))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            ORIGIN,
+            CONTENT_TYPE,
+            ACCEPT,
+            AUTHORIZATION,
+            CONTENT_DISPOSITION,
+            axum::http::HeaderName::from_static("x-idempotency-key"),
+        ])
+        .expose_headers([CONTENT_DISPOSITION])
 }
 
 async fn liveness() -> impl IntoResponse {
