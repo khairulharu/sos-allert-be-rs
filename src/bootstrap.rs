@@ -9,19 +9,23 @@ use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::repository::address_repository::PgAddressRepository;
+use crate::repository::alert_repository::PgAlertRepository;
 use crate::repository::contact_repository::PgContactRepository;
 use crate::repository::emergency_contact_repository::PgEmergencyContactRepository;
+use crate::repository::idempotency::RedisIdempotencyRepository;
 use crate::repository::location_cache::RedisLocationCacheRepository;
 use crate::repository::location_repository::PgLocationRepository;
 use crate::repository::rate_limit::RedisRateLimitRepository;
 use crate::repository::redis_conn::RedisHandle;
 use crate::repository::session::{run_invalidation, CachedSessionStore, RedisSessionStore};
 use crate::repository::user_repository::PgUserRepository;
+use crate::tracking::Hub;
 use crate::usecase::address::AddressUseCase;
 use crate::usecase::auth::{AuthUseCase, SessionStore};
 use crate::usecase::contact::ContactUseCase;
 use crate::usecase::emergency::EmergencyContactUseCase;
 use crate::usecase::location::LocationUseCase;
+use crate::usecase::sos::{SosSettings, SosUseCase};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -33,6 +37,8 @@ pub struct AppState {
     addresses: Arc<AddressUseCase>,
     locations: Arc<LocationUseCase>,
     emergency_contacts: Arc<EmergencyContactUseCase>,
+    sos: Arc<SosUseCase>,
+    hub: Arc<Hub>,
     rate_limiter: Arc<RedisRateLimitRepository>,
     sessions: Arc<CachedSessionStore>,
 }
@@ -66,6 +72,14 @@ impl AppState {
         &self.locations
     }
 
+    pub fn sos(&self) -> &SosUseCase {
+        &self.sos
+    }
+
+    pub fn hub(&self) -> &Arc<Hub> {
+        &self.hub
+    }
+
     pub fn emergency_contacts(&self) -> &EmergencyContactUseCase {
         &self.emergency_contacts
     }
@@ -74,13 +88,20 @@ impl AppState {
         &self.rate_limiter
     }
 
-    /// Start the background tasks the web process needs (session invalidation
-    /// today, the dispatch outbox and housekeeping in phase 3).
+    /// Start the background tasks the web process needs: session invalidation,
+    /// the durable grace-period outbox and housekeeping.
     pub fn spawn_background(&self, shutdown: tokio::sync::watch::Receiver<bool>) {
         let cache = self.sessions.clone();
         let redis = self.redis.clone();
+        let invalidation_shutdown = shutdown.clone();
         tokio::spawn(async move {
-            run_invalidation(redis, cache, shutdown).await;
+            run_invalidation(redis, cache, invalidation_shutdown).await;
+        });
+
+        let sos = self.sos.clone();
+        let settings = sos.settings().clone();
+        tokio::spawn(async move {
+            run_sos_loops(sos, settings, shutdown).await;
         });
     }
 }
@@ -140,6 +161,32 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         PgEmergencyContactRepository::new(db.clone()),
     )));
 
+    let alerts = Arc::new(PgAlertRepository::new(db.clone()));
+    let sos_settings = SosSettings {
+        grace_period: Duration::from_secs(config.sos.grace_period_seconds),
+        dispatch_poll: Duration::from_millis(config.sos.dispatch_poll_interval_ms()),
+        max_recipients: config.sos.max_recipients,
+        min_recipients: 3,
+        radii: vec![1000.0, 2000.0, 5000.0],
+        rate_limit_per_hour: config.sos.rate_limit_per_hour,
+        rate_limit_window: Duration::from_secs(3600),
+        rate_limit_disabled: config.sos.rate_limit_disabled,
+        expire_after: Duration::from_secs(24 * 3600),
+    };
+    let hub = Hub::new(
+        config.sos.ws_max_connections,
+        config.sos.ws_max_per_ip,
+        config.sos.ws_max_per_user,
+    );
+    let sos = Arc::new(
+        SosUseCase::new(alerts, sos_settings)
+            .with_locations(Arc::new(RedisLocationCacheRepository::new(redis.clone())))
+            .with_idempotency(Arc::new(RedisIdempotencyRepository::new(redis.clone())))
+            .with_rate_limiter(Arc::new(RedisRateLimitRepository::new(redis.clone())))
+            .with_users(Arc::new(PgUserRepository::new(db.clone())))
+            .with_hub(hub.clone() as Arc<dyn crate::usecase::sos::TrackHub>),
+    );
+
     let rate_limiter = Arc::new(RedisRateLimitRepository::new(redis.clone()));
 
     Ok(AppState {
@@ -151,9 +198,44 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         addresses,
         locations,
         emergency_contacts,
+        sos,
+        hub,
         rate_limiter,
         sessions,
     })
+}
+
+/// Dispatch outbox tick plus the housekeeping loop. Both are best effort: a
+/// failed tick is logged and the loop keeps running.
+async fn run_sos_loops(
+    sos: Arc<SosUseCase>,
+    settings: SosSettings,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let poll = settings.dispatch_poll.max(Duration::from_millis(100));
+    let housekeeping_every = poll.max(Duration::from_secs(60));
+    let mut dispatch = tokio::time::interval(poll);
+    let mut housekeeping = tokio::time::interval(housekeeping_every);
+    // The first housekeeping pass runs immediately, like the Go service.
+    dispatch.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => return,
+            _ = dispatch.tick() => {
+                match sos.dispatch_due(100).await {
+                    Ok(0) => {}
+                    Ok(count) => tracing::info!(count, "grace-period fan-out dispatched"),
+                    Err(e) => tracing::warn!(error = %e, "dispatch outbox tick failed"),
+                }
+            }
+            _ = housekeeping.tick() => {
+                if let Err(e) = sos.housekeeping().await {
+                    tracing::warn!(error = %e, "housekeeping failed");
+                }
+            }
+        }
+    }
 }
 
 /// Apply pending migrations. Called by an explicit subcommand, never on boot:

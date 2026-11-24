@@ -6,4 +6,6 @@ pub mod emergency_controller;
 pub mod location_controller;
 pub mod middleware;
 pub mod routes;
+pub mod sos_controller;
 pub mod user_controller;
+pub mod ws_track;

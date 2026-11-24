@@ -27,6 +27,11 @@ pub trait UserStore: Send + Sync {
     async fn find_by_id(&self, id: &str) -> AppResult<Option<User>>;
     async fn create(&self, user: &User) -> AppResult<()>;
     async fn update(&self, user: &User) -> AppResult<()>;
+    /// Display names for a page of alert senders, one query.
+    async fn names_by_ids(
+        &self,
+        ids: &[String],
+    ) -> AppResult<std::collections::HashMap<String, String>>;
 }
 
 #[async_trait]

@@ -40,6 +40,24 @@ redis.call("PEXPIRE", windowKey, windowMs)
 return {1, 0}
 "#;
 
+const SOS_RATE_LIMIT_PREFIX: &str = "ratelimit:sos:";
+
+const RATE_LIMIT_SCRIPT: &str = r#"
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local windowMs = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local member = ARGV[4]
+redis.call("ZREMRANGEBYSCORE", key, 0, now - windowMs)
+local count = redis.call("ZCARD", key)
+if count >= limit then
+  return 0
+end
+redis.call("ZADD", key, now, member)
+redis.call("PEXPIRE", key, windowMs)
+return 1
+"#;
+
 #[derive(Clone)]
 pub struct RedisRateLimitRepository {
     redis: RedisHandle,
@@ -81,6 +99,33 @@ impl RedisRateLimitRepository {
                 "redis auth rate limit: unexpected reply {other:?}"
             ))),
         }
+    }
+}
+
+impl RedisRateLimitRepository {
+    /// Per-user SOS trigger limit: `limit` per window, sliding.
+    pub async fn allow_sos(&self, user_id: &str, limit: u32, window: Duration) -> AppResult<bool> {
+        let now = now_millis();
+        let member = format!("{now}-{}", now_nanos());
+        let mut conn = self.redis.conn().await?;
+        let script = redis::Script::new(RATE_LIMIT_SCRIPT);
+        let allowed: i64 = script
+            .key(format!("{SOS_RATE_LIMIT_PREFIX}{user_id}"))
+            .arg(now)
+            .arg(window.as_millis() as i64)
+            .arg(limit as i64)
+            .arg(member)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| AppError::Unavailable(format!("redis rate limit: {e}")))?;
+        Ok(allowed == 1)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::usecase::sos::SosRateLimiter for RedisRateLimitRepository {
+    async fn allow(&self, user_id: &str, limit: u32, window: Duration) -> AppResult<bool> {
+        self.allow_sos(user_id, limit, window).await
     }
 }
 

@@ -6,6 +6,7 @@
 
 pub mod contact;
 pub mod location;
+pub mod sos;
 
 pub use contact::{
     AddressResponse, ContactResponse, CreateAddressRequest, CreateContactRequest,

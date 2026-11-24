@@ -66,6 +66,26 @@ impl UserStore for PgUserRepository {
         }
     }
 
+    async fn names_by_ids(
+        &self,
+        ids: &[String],
+    ) -> AppResult<std::collections::HashMap<String, String>> {
+        let mut out = std::collections::HashMap::with_capacity(ids.len());
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let rows = sqlx::query("SELECT id, name FROM users WHERE id = ANY($1)")
+            .bind(ids)
+            .fetch_all(&self.pool)
+            .await?;
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let name: String = row.try_get("name")?;
+            out.insert(id, name);
+        }
+        Ok(out)
+    }
+
     async fn update(&self, user: &User) -> AppResult<()> {
         sqlx::query(
             "UPDATE users SET name = $2, password = $3, updated_at = $4, \

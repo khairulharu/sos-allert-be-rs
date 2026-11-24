@@ -20,7 +20,7 @@ use crate::delivery::http::middleware::auth_rate_limit::auth_rate_limit;
 use crate::delivery::http::middleware::metrics_token::require_metrics_token;
 use crate::delivery::http::{
     address_controller, contact_controller, emergency_controller, location_controller,
-    user_controller,
+    sos_controller, user_controller, ws_track,
 };
 use crate::repository::health;
 
@@ -62,6 +62,24 @@ pub fn router(state: AppState) -> Router {
             "/api/emergency-contacts",
             get(emergency_controller::list).post(emergency_controller::create),
         )
+        // Static SOS routes first; axum prefers them over `{alertId}` anyway.
+        .route("/api/sos", post(sos_controller::trigger))
+        .route("/api/sos/active", get(sos_controller::active))
+        .route("/api/sos/inbox", get(sos_controller::inbox))
+        .route("/api/sos/history", get(sos_controller::history))
+        .route("/api/sos/summary", get(sos_controller::summary))
+        .route("/api/sos/{alertId}", get(sos_controller::get))
+        .route("/api/sos/{alertId}/cancel", post(sos_controller::cancel))
+        .route(
+            "/api/sos/{alertId}/acknowledge",
+            post(sos_controller::acknowledge),
+        )
+        .route("/api/sos/{alertId}/resolve", post(sos_controller::resolve))
+        .route("/api/sos/{alertId}/respond", post(sos_controller::respond))
+        .route(
+            "/api/sos/{alertId}/breadcrumbs",
+            get(sos_controller::list_breadcrumbs).post(sos_controller::add_breadcrumb),
+        )
         .route("/api/location", get(location_controller::get))
         .route("/api/location/nearby", get(location_controller::nearby))
         .route(
@@ -74,6 +92,9 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(liveness))
         .route("/healthz/ready", get(readiness))
         .route("/metrics", get(metrics))
+        // Tracking socket: outside the HTTP auth middleware on purpose; the
+        // handler does its own in-band auth and connection budgets.
+        .route("/ws/sos/{alertId}/track", get(ws_track::handler))
         // Static routes are registered before `:alertId` in the Go service;
         // that ordering matters in phase 3.
         .merge(guest)

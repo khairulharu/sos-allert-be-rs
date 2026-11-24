@@ -34,6 +34,10 @@ pub enum AppError {
     #[error("{0}")]
     Conflict(String),
 
+    /// A missing prerequisite, e.g. no safe PIN configured (`412`).
+    #[error("{0}")]
+    Precondition(String),
+
     /// Business rule violation (`422`), mirrors Go's mapSOSError.
     #[error("{0}")]
     Unprocessable(String),
@@ -72,6 +76,7 @@ impl AppError {
             AppError::Unauthorized => 401,
             AppError::Forbidden(_) => 403,
             AppError::NotFound(_) => 404,
+            AppError::Precondition(_) => 412,
             AppError::Conflict(_) => 409,
             AppError::TooManyRequests { .. } => 429,
             AppError::Unavailable(_) => 503,

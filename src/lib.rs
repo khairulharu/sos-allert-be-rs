@@ -22,6 +22,7 @@ pub mod gateway;
 pub mod geo;
 pub mod model;
 pub mod repository;
+pub mod tracking;
 pub mod usecase;
 
 pub use error::{AppError, AppResult};

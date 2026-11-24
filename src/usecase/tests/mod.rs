@@ -5,3 +5,4 @@ mod auth;
 mod contact;
 mod emergency;
 mod location;
+mod sos;

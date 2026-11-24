@@ -42,6 +42,14 @@ impl UserStore for FakeUsers {
             .insert(user.id.clone(), user.clone());
         Ok(())
     }
+
+    async fn names_by_ids(&self, ids: &[String]) -> AppResult<HashMap<String, String>> {
+        let rows = self.rows.lock().unwrap();
+        Ok(ids
+            .iter()
+            .filter_map(|id| rows.get(id).map(|user| (id.clone(), user.name.clone())))
+            .collect())
+    }
 }
 
 #[derive(Default)]

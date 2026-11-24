@@ -40,3 +40,11 @@ validator = { version = "0.20.0", features = ["derive"] }
 [dev-dependencies]
 bcrypt = "0.19.3"
 http-body-util = "0.1.5"
+tokio-tungstenite = "0.30.0"
+
+# The 16G disk cannot hold two debuginfo builds of this tree.
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

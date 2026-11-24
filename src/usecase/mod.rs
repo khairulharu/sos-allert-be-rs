@@ -19,6 +19,7 @@ pub mod auth;
 pub mod contact;
 pub mod emergency;
 pub mod location;
+pub mod sos;
 
 #[cfg(test)]
 mod tests;

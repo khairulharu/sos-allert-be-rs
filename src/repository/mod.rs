@@ -20,9 +20,11 @@
 //! inherit, and explicit SQL is what keeps the radius queries off a seq scan.
 
 pub mod address_repository;
+pub mod alert_repository;
 pub mod contact_repository;
 pub mod emergency_contact_repository;
 pub mod health;
+pub mod idempotency;
 pub mod location_cache;
 pub mod location_repository;
 pub mod rate_limit;

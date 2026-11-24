@@ -84,13 +84,19 @@ async fn ensure_migrated(state: &AppState) {
 }
 
 pub async fn harness() -> Option<Harness> {
-    let config = match test_config() {
+    harness_custom(|_| {}).await
+}
+
+/// Same harness with a chance to tweak the config (grace period, rate limit).
+pub async fn harness_custom(tweak: impl FnOnce(&mut Config)) -> Option<Harness> {
+    let mut config = match test_config() {
         Some(config) => config,
         None => {
             eprintln!("skip: TEST_DATABASE_URL / TEST_REDIS_URL not set");
             return None;
         }
     };
+    tweak(&mut config);
 
     let state = build_state(config.clone()).expect("state builds");
     ensure_migrated(&state).await;
@@ -132,6 +138,15 @@ pub async fn send(
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     };
     (status, json)
+}
+
+/// A geographic area far enough from other tests (~0.5 deg grid) that leftover
+/// GEO entries from another run cannot join this test's fan-out.
+pub fn unique_area() -> (f64, f64) {
+    let bytes = uuid::Uuid::new_v4().into_bytes();
+    let lon = 90.0 + (bytes[0] as f64 % 100.0) * 0.5;
+    let lat = -20.0 + (bytes[1] as f64 % 80.0) * 0.5;
+    (lon, lat)
 }
 
 pub fn unique_id(prefix: &str) -> String {

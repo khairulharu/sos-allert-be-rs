@@ -12,6 +12,7 @@ use crate::domain::LocationCache;
 use crate::error::{AppError, AppResult};
 use crate::repository::redis_conn::RedisHandle;
 use crate::usecase::location::{GeoHit, LocationGeoStore};
+use crate::usecase::sos::SosLocationStore;
 
 pub const USER_LOCATION_KEY: &str = "users:locations";
 pub const USER_LAST_SEEN_KEY: &str = "users:last_seen";
@@ -207,5 +208,54 @@ fn value_to_i64(value: &Value) -> Option<i64> {
         Value::SimpleString(text) => text.parse().ok(),
         Value::Double(number) => Some(*number as i64),
         _ => None,
+    }
+}
+
+#[async_trait]
+impl SosLocationStore for RedisLocationCacheRepository {
+    async fn get(&self, user_id: &str) -> AppResult<Option<LocationCache>> {
+        <Self as LocationGeoStore>::get(self, user_id).await
+    }
+
+    async fn save(&self, longitude: f64, latitude: f64, user_id: &str) -> AppResult<()> {
+        <Self as LocationGeoStore>::save(
+            self,
+            &LocationCache::new(user_id, longitude, latitude),
+            crate::usecase::auth::default_now_millis(),
+        )
+        .await
+    }
+
+    async fn search_ids(
+        &self,
+        longitude: f64,
+        latitude: f64,
+        radius_meters: f64,
+        count: usize,
+    ) -> AppResult<Vec<String>> {
+        let mut conn = self.redis.conn().await?;
+        let raw: Value = redis::cmd("GEOSEARCH")
+            .arg(USER_LOCATION_KEY)
+            .arg("FROMLONLAT")
+            .arg(longitude)
+            .arg(latitude)
+            .arg("BYRADIUS")
+            .arg(radius_meters)
+            .arg("m")
+            .arg("ASC")
+            .arg("COUNT")
+            .arg(count)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| AppError::Unavailable(format!("redis geosearch ids: {e}")))?;
+
+        let Value::Array(rows) = raw else {
+            return Ok(Vec::new());
+        };
+        Ok(rows.iter().filter_map(value_to_string).collect())
+    }
+
+    async fn last_seen_batch(&self, user_ids: &[String]) -> AppResult<HashMap<String, i64>> {
+        <Self as LocationGeoStore>::last_seen_batch(self, user_ids).await
     }
 }
