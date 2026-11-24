@@ -86,6 +86,15 @@ and continues instead of failing the trigger. APNs reads
 `403 TooManyProviderTokenUpdates`. Provider request shapes are asserted against
 a local mock server in `src/gateway/notify/tests.rs`.
 
+## Web Push
+
+`webpush.*` in config: VAPID public/private keys (base64url, raw P-256 scalar),
+`subscriber` (bare email inside the VAPID `sub` claim), `ttl_seconds`, and
+`allowed_hosts` (the SSRF guard; empty falls back to the FCM/Mozilla/Apple
+hosts, and an entry starting with `.` matches a subdomain suffix). A stored
+endpoint is re-checked against that list at send time. `404`/`410` from the push
+service deletes the subscription.
+
 ## Tests
 
 - Unit tests live in `src/<module>/tests.rs`, declared with

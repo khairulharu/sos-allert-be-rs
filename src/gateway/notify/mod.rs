@@ -12,11 +12,13 @@ pub mod apns;
 pub mod dispatcher;
 pub mod fcm;
 pub mod twilio;
+pub mod webpush;
 
 pub use apns::ApnsNotifier;
 pub use dispatcher::AlertDispatcher;
 pub use fcm::FcmNotifier;
 pub use twilio::TwilioNotifier;
+pub use webpush::WebPushNotifier;
 
 /// Provider failure: not configured, or the request itself failed.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -9,7 +9,9 @@ use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::gateway::kafka::KafkaPublisher;
-use crate::gateway::notify::{AlertDispatcher, ApnsNotifier, FcmNotifier, TwilioNotifier};
+use crate::gateway::notify::{
+    AlertDispatcher, ApnsNotifier, FcmNotifier, TwilioNotifier, WebPushNotifier,
+};
 use crate::gateway::publisher::EventPublisher;
 use crate::repository::address_repository::PgAddressRepository;
 use crate::repository::alert_repository::PgAlertRepository;
@@ -18,6 +20,7 @@ use crate::repository::emergency_contact_repository::PgEmergencyContactRepositor
 use crate::repository::idempotency::RedisIdempotencyRepository;
 use crate::repository::location_cache::RedisLocationCacheRepository;
 use crate::repository::location_repository::PgLocationRepository;
+use crate::repository::push_subscription_repository::PgPushSubscriptionRepository;
 use crate::repository::rate_limit::RedisRateLimitRepository;
 use crate::repository::redis_conn::RedisHandle;
 use crate::repository::session::{run_invalidation, CachedSessionStore, RedisSessionStore};
@@ -29,6 +32,7 @@ use crate::usecase::auth::{AuthUseCase, SessionStore};
 use crate::usecase::contact::ContactUseCase;
 use crate::usecase::emergency::EmergencyContactUseCase;
 use crate::usecase::location::LocationUseCase;
+use crate::usecase::push::PushUseCase;
 use crate::usecase::sos::{SosSettings, SosUseCase};
 use crate::usecase::triage::OfflineClassifier;
 
@@ -42,6 +46,7 @@ pub struct AppState {
     addresses: Arc<AddressUseCase>,
     locations: Arc<LocationUseCase>,
     emergency_contacts: Arc<EmergencyContactUseCase>,
+    push: Arc<PushUseCase>,
     sos: Arc<SosUseCase>,
     hub: Arc<Hub>,
     rate_limiter: Arc<RedisRateLimitRepository>,
@@ -79,6 +84,10 @@ impl AppState {
 
     pub fn sos(&self) -> &SosUseCase {
         &self.sos
+    }
+
+    pub fn push(&self) -> &PushUseCase {
+        &self.push
     }
 
     pub fn hub(&self) -> &Arc<Hub> {
@@ -166,6 +175,13 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         PgEmergencyContactRepository::new(db.clone()),
     )));
 
+    let push = Arc::new(PushUseCase::new(
+        Arc::new(PgPushSubscriptionRepository::new(db.clone())),
+        config.webpush.vapid_public_key.clone(),
+        config.webpush.enabled,
+        config.webpush.allowed_hosts.clone(),
+    ));
+
     let alerts = Arc::new(PgAlertRepository::new(db.clone()));
     let sos_settings = SosSettings {
         grace_period: Duration::from_secs(config.sos.grace_period_seconds),
@@ -237,6 +253,7 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         addresses,
         locations,
         emergency_contacts,
+        push,
         sos,
         hub,
         rate_limiter,
@@ -263,6 +280,12 @@ pub fn build_dispatcher(config: &Config, db: PgPool) -> AlertDispatcher {
         Vec::new()
     };
 
+    let subscriptions = Arc::new(PgPushSubscriptionRepository::new(db.clone()));
+    let web = config
+        .webpush
+        .enabled
+        .then(|| Arc::new(WebPushNotifier::new(&config.webpush, subscriptions)));
+
     AlertDispatcher {
         fcm: config.fcm.enabled.then(|| FcmNotifier::new(&config.fcm)),
         apns: Some(ApnsNotifier::new(&config.apns, apns_key)).filter(|n| n.configured()),
@@ -272,6 +295,7 @@ pub fn build_dispatcher(config: &Config, db: PgPool) -> AlertDispatcher {
             .then(|| TwilioNotifier::new(&config.twilio)),
         tokens: Some(Arc::new(PgUserRepository::new(db.clone()))),
         contacts: Some(Arc::new(PgEmergencyContactRepository::new(db))),
+        web,
     }
 }
 

@@ -19,7 +19,7 @@ the Kafka worker, remote AI providers and STT are still to come; see
 | migrations | golang-migrate | sqlx::migrate (same filenames/order) |
 | sessions / geo | go-redis | redis 1.x (async) |
 | kafka | IBM/sarama | rdkafka (librdkafka), consumer groups like sarama |
-| push | FCM v1, APNs, Twilio | reqwest + jsonwebtoken (ES256); web push not ported |
+| push | FCM v1, APNs, Twilio, Web Push | reqwest + jsonwebtoken (ES256) + web-push (VAPID) |
 | tests | `_test.go` per package | `src/<module>/tests.rs` + `tests/` |
 
 ## Run

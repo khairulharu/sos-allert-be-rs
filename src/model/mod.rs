@@ -7,6 +7,7 @@
 pub mod contact;
 pub mod events;
 pub mod location;
+pub mod push;
 pub mod sos;
 
 pub use contact::{

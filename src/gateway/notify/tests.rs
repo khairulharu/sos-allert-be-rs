@@ -438,6 +438,7 @@ fn dispatcher(base: &str, with_contacts: bool) -> AlertDispatcher {
                 rows: vec![contact()],
             }) as Arc<dyn EmergencyContactStore>
         }),
+        web: None,
     }
 }
 
@@ -504,6 +505,7 @@ async fn an_unconfigured_dispatcher_is_log_only_and_succeeds() {
         contacts: Some(Arc::new(FakeContacts {
             rows: vec![contact()],
         })),
+        web: None,
     };
 
     dispatcher
@@ -524,6 +526,7 @@ async fn a_failing_push_alone_still_succeeds_when_no_sms_is_configured() {
             user: user_with_tokens(),
         })),
         contacts: None,
+        web: None,
     };
 
     dispatcher
@@ -553,6 +556,7 @@ async fn a_failing_push_and_failing_sms_error() {
             user: user_with_tokens(),
         })),
         contacts: Some(Arc::new(FailingContacts)),
+        web: None,
     };
 
     assert!(dispatcher

@@ -20,7 +20,7 @@ use crate::delivery::http::middleware::auth_rate_limit::auth_rate_limit;
 use crate::delivery::http::middleware::metrics_token::require_metrics_token;
 use crate::delivery::http::{
     address_controller, contact_controller, emergency_controller, location_controller,
-    sos_controller, user_controller, ws_track,
+    push_controller, sos_controller, user_controller, ws_track,
 };
 use crate::repository::health;
 
@@ -90,6 +90,16 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/sos/{alertId}/breadcrumbs",
             get(sos_controller::list_breadcrumbs).post(sos_controller::add_breadcrumb),
+        )
+        .route(
+            "/api/push/vapid-public-key",
+            get(push_controller::vapid_public_key),
+        )
+        .route(
+            "/api/push/subscriptions",
+            get(push_controller::list)
+                .post(push_controller::subscribe)
+                .delete(push_controller::unsubscribe),
         )
         .route("/api/location", get(location_controller::get))
         .route("/api/location/nearby", get(location_controller::nearby))
