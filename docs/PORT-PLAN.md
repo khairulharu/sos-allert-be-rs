@@ -198,7 +198,7 @@ because it compiles.
   the worker joined `sos-allert-rs`, `-users`, `-contacts`, `-addresses`.
 - Remaining: the worker's notifier is still the no-op (phase 4 push/SMS).
 
-### 6. AI triage and STT (partial: offline classifier done)
+### 6. AI triage and STT (done)
 
 - Offline keyword classifier first, then jev > openai > ollama chain, fail-open,
   severity clamping, `severity`/`summary` persistence (0 is a real score).
@@ -211,10 +211,31 @@ because it compiles.
   starting radius, an explicit `emergency_type` wins over the classifier, and a
   description with no signal stores no triage. Covered by the full Go case
   table plus HTTP tests.
-- Remaining in this phase: the jev/openai/ollama HTTP providers and
-  `POST /api/sos/classify` + Whisper STT (silence sentinel). With `ai.provider`
-  set to a remote provider today, the service logs a warning and uses the
-  offline classifier instead of losing triage.
+- Done: the provider chain and STT.
+  * `AiTriage` walks jev > openai (when a key is set) > offline, or
+    ollama > offline, taking the first usable answer; an error or a no-signal
+    answer falls through, so no single provider can block an alert.
+  * jev: one `/v1/systemone` request with a `choice` and a `score` question,
+    confidence floor 0.5, `score / (levels-1)` as severity, Indonesian summary
+    derived locally.
+  * openai: `/chat/completions` with `json_object`; ollama: `/api/chat` with
+    `format: json`. Answers are validated strictly (known type, score present
+    and in range) so a malformed answer falls back instead of inventing data.
+  * `POST /api/sos/classify`: audio only, 25 MB, transcribes + triages without
+    persisting, `503` when STT is off, `502` on a provider failure, `200` with
+    `transcription_status: "empty"` for silence. The result is stored
+    single-use for 2 minutes (`classify:pending:<user>`) and the **next trigger
+    consumes it**, so the first fan-out uses the audio level and no
+    client-supplied severity is trusted. Throttled per user
+    (`sos.classify_rate_limit_per_hour`) and **fails closed** with `503`,
+    because every call pays for STT + LLM tokens.
+  * media upload: audio up to 25 MB is transcribed, triaged, the alert's
+    triage is updated and `ALERT_TRIAGE` is broadcast; a wider classification
+    escalates the fan-out to the responders the wider radius adds (recorded as
+    recipients; inside a grace window the outbox notifies them).
+  * Whisper silence sentinel ported 1:1: `no_speech_prob` >= 0.6, repetition
+    ratio > 2.4, low `avg_logprob` with short text, clips under 0.5 s, and the
+    stock subtitle phrases (whole-word, repetition-tolerant).
 
 ### 7. Parity and cutover notes
 

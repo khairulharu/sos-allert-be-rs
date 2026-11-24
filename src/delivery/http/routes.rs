@@ -17,6 +17,7 @@ use serde_json::json;
 use crate::bootstrap::AppState;
 use crate::delivery::http::middleware::auth::require_auth;
 use crate::delivery::http::middleware::auth_rate_limit::auth_rate_limit;
+use crate::delivery::http::middleware::classify_rate_limit::classify_rate_limit;
 use crate::delivery::http::middleware::metrics_token::require_metrics_token;
 use crate::delivery::http::{
     address_controller, contact_controller, emergency_controller, location_controller,
@@ -64,6 +65,13 @@ pub fn router(state: AppState) -> Router {
         )
         // Static SOS routes first; axum prefers them over `{alertId}` anyway.
         .route("/api/sos", post(sos_controller::trigger))
+        .route(
+            "/api/sos/classify",
+            post(sos_controller::classify).layer(axum_mw::from_fn_with_state(
+                state.clone(),
+                classify_rate_limit,
+            )),
+        )
         .route("/api/sos/active", get(sos_controller::active))
         .route("/api/sos/inbox", get(sos_controller::inbox))
         .route("/api/sos/history", get(sos_controller::history))

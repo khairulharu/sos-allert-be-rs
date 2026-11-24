@@ -17,6 +17,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+pub mod providers;
+
+pub use providers::{AiTriage, JevClient, OllamaClient, OpenAiClient};
+
 use crate::model::sos::TriageInfo;
 use crate::usecase::triage_keywords as kw;
 
@@ -201,7 +205,7 @@ fn pick_emergency_type(scores: &[(&'static str, i32)]) -> &'static str {
     best
 }
 
-fn summarize(kind: &str, severity: f64, evidence: &str) -> String {
+pub(crate) fn summarize(kind: &str, severity: f64, evidence: &str) -> String {
     let mut line = match kind {
         EMERGENCY_TYPE_MEDICAL => "Kemungkinan darurat medis",
         EMERGENCY_TYPE_ACCIDENT => "Kemungkinan kecelakaan",

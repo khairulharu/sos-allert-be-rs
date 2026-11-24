@@ -346,6 +346,21 @@ pub fn responder_metrics(
     (distance, estimate_eta_seconds(distance) as i64)
 }
 
+/// `POST /api/sos/classify` result: audio-derived triage, nothing persisted.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClassifyResponse {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub emergency_type: String,
+    #[serde(default)]
+    pub severity: f64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub transcript: String,
+    /// completed | empty
+    pub transcription_status: String,
+}
+
 /// One stored incident upload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertMediaResponse {
@@ -362,4 +377,14 @@ pub struct AlertMediaResponse {
     pub transcription_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcribed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triage: Option<TriageInfo>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub escalated: bool,
+    #[serde(skip_serializing_if = "is_zero_usize")]
+    pub recipients_added: usize,
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
 }

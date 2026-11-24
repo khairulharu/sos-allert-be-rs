@@ -12,8 +12,8 @@ use crate::bootstrap::AppState;
 use crate::error::{AppError, AppResult};
 use crate::model::sos::{
     AlertDetailResponse, AlertMediaResponse, AlertSummaryResponse, BreadcrumbRequest,
-    BreadcrumbResponse, CancelSosRequest, CancelSosResponse, RespondSosRequest, RespondSosResponse,
-    SearchAlertHistoryRequest, TriggerSosRequest,
+    BreadcrumbResponse, CancelSosRequest, CancelSosResponse, ClassifyResponse, RespondSosRequest,
+    RespondSosResponse, SearchAlertHistoryRequest, TriggerSosRequest,
 };
 use crate::model::{Auth, PageMetadata, WebResponse};
 
@@ -267,4 +267,43 @@ pub async fn download_media(
         bytes,
     )
         .into_response())
+}
+
+/// `POST /api/sos/classify` (multipart, field `file`). Throttled by the
+/// classify limiter and mounted separately from the other SOS routes.
+pub async fn classify(
+    State(state): State<AppState>,
+    Extension(auth): Extension<Auth>,
+    multipart: Result<Multipart, MultipartRejection>,
+) -> AppResult<Json<WebResponse<ClassifyResponse>>> {
+    let mut multipart = multipart.map_err(|_| AppError::BadRequest("Bad Request".into()))?;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| AppError::BadRequest("Bad Request".into()))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let filename = field.file_name().unwrap_or("audio.webm").to_owned();
+        let content_type = field
+            .content_type()
+            .unwrap_or("application/octet-stream")
+            .to_owned();
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|_| AppError::BadRequest("Bad Request".into()))?;
+
+        let response = state
+            .sos()
+            .classify_audio(&auth.id, &filename, &content_type, &bytes)
+            .await?;
+        return Ok(Json(WebResponse::ok(response)));
+    }
+
+    Err(AppError::BadRequest(
+        "multipart field 'file' is required".into(),
+    ))
 }
