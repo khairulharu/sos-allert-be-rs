@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::domain::Alert;
 use crate::error::{AppError, AppResult};
 use crate::model::events::{AddressEvent, ContactEvent, SosEvent, UserEvent};
 use crate::usecase::sos::SosNotifier;
@@ -92,37 +91,17 @@ impl MessageHandler for SosDispatchConsumer {
         let event: SosEvent = serde_json::from_slice(&message.payload)
             .map_err(|e| AppError::BadRequest(format!("invalid SOS event: {e}")))?;
 
-        let alert = Alert {
-            id: event.alert_id.clone(),
-            sender_id: event.sender_id.clone(),
-            longitude: event.longitude,
-            latitude: event.latitude,
-            triggered_at: event.triggered_at,
-            status: event.status.clone(),
-            emergency_type: event.emergency_type.clone(),
-            severity: (event.severity != 0.0).then_some(event.severity),
-            summary: (!event.summary.is_empty()).then(|| event.summary.clone()),
-            accuracy_meters: None,
-            battery_percentage: None,
-            cancellation_reason: None,
-            resolved_at: None,
-            cancelled_at: None,
-            dispatch_due_at: None,
-            dispatched_at: None,
-        };
-
-        let cancelled = || false;
-        let _ = cancelled;
+        let notice = event.to_notice();
 
         let work = async {
             if event.push_only {
                 // Escalation event: only the added responders, and the
                 // emergency-contact SMS must not run twice.
                 self.notifier
-                    .notify_recipients(&event.recipients, &alert)
+                    .notify_recipients(&event.recipients, &notice)
                     .await
             } else {
-                self.notifier.notify(&event.recipients, &alert).await
+                self.notifier.notify(&event.recipients, &notice).await
             }
         };
 

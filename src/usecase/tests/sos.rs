@@ -10,11 +10,11 @@ use async_trait::async_trait;
 
 use crate::domain::{Alert, AlertBreadcrumb, AlertMedia, AlertResponse, LocationCache, User};
 use crate::error::{AppError, AppResult};
+use crate::model::sos::{AlertNotice, ResponderSummary, TriageInfo};
 use crate::model::sos::{
     BreadcrumbRequest, CancelSosRequest, RespondSosRequest, SearchAlertHistoryRequest,
     TriggerSosRequest,
 };
-use crate::model::sos::{ResponderSummary, TriageInfo};
 use crate::usecase::auth::UserStore;
 use crate::usecase::sos::{
     AlertStore, AlertUpdate, SosIdempotency, SosLocationStore, SosNotifier, SosRateLimiter,
@@ -578,11 +578,11 @@ struct FakeNotifier {
 
 #[async_trait]
 impl SosNotifier for FakeNotifier {
-    async fn notify(&self, recipient_ids: &[String], alert: &Alert) -> AppResult<()> {
+    async fn notify(&self, recipient_ids: &[String], notice: &AlertNotice) -> AppResult<()> {
         self.calls
             .lock()
             .unwrap()
-            .push((recipient_ids.to_vec(), alert.id.clone()));
+            .push((recipient_ids.to_vec(), notice.alert_id.clone()));
         Ok(())
     }
 }

@@ -26,7 +26,7 @@ use crate::gateway::publisher::EventPublisher;
 use crate::geo::{mask_coordinates, quantize_distance_meters};
 use crate::model::events::{topics, SosEvent};
 use crate::model::sos::{
-    responder_metrics, AlertDetailResponse, AlertMediaResponse, AlertRespondedCounts,
+    responder_metrics, AlertDetailResponse, AlertMediaResponse, AlertNotice, AlertRespondedCounts,
     AlertStatusCounts, AlertSummaryResponse, BreadcrumbRequest, BreadcrumbResponse,
     CancelSosRequest, CancelSosResponse, LocationPoint, RespondSosRequest, RespondSosResponse,
     ResponderSummary, SearchAlertHistoryRequest, SenderSummary, SosCreatedResponse, TriageInfo,
@@ -155,14 +155,18 @@ pub trait SosRateLimiter: Send + Sync {
 
 #[async_trait]
 pub trait SosNotifier: Send + Sync {
-    async fn notify(&self, recipient_ids: &[String], alert: &Alert) -> AppResult<()>;
+    async fn notify(&self, recipient_ids: &[String], notice: &AlertNotice) -> AppResult<()>;
 
     /// Push-only fan-out for a post-trigger escalation: the sender's
     /// emergency contacts must not be texted a second time. Notifiers without
     /// a separate surface fall back to the full fan-out, which is better than
     /// dropping the alert (same as the Go worker).
-    async fn notify_recipients(&self, recipient_ids: &[String], alert: &Alert) -> AppResult<()> {
-        self.notify(recipient_ids, alert).await
+    async fn notify_recipients(
+        &self,
+        recipient_ids: &[String],
+        notice: &AlertNotice,
+    ) -> AppResult<()> {
+        self.notify(recipient_ids, notice).await
     }
 }
 
@@ -171,7 +175,7 @@ pub struct NoopNotifier;
 
 #[async_trait]
 impl SosNotifier for NoopNotifier {
-    async fn notify(&self, _recipient_ids: &[String], _alert: &Alert) -> AppResult<()> {
+    async fn notify(&self, _recipient_ids: &[String], _notice: &AlertNotice) -> AppResult<()> {
         Ok(())
     }
 }
@@ -583,7 +587,8 @@ impl SosUseCase {
             }
         }
 
-        if let Err(e) = self.notifier.notify(recipients, alert).await {
+        let notice = AlertNotice::from(alert).with_client_claim(client_severity, client_summary);
+        if let Err(e) = self.notifier.notify(recipients, &notice).await {
             tracing::error!(error = %e, alert_id = %alert.id, "notify failed");
         }
     }

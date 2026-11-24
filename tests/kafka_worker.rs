@@ -17,11 +17,11 @@ use sos_allert::delivery::messaging::consumer::{
     run_consumer, ConsumerOptions, ConsumerSettings, DeadLetter,
 };
 use sos_allert::delivery::messaging::handlers::SosDispatchConsumer;
-use sos_allert::domain::Alert;
 use sos_allert::error::AppResult;
 use sos_allert::gateway::kafka::KafkaPublisher;
 use sos_allert::gateway::publisher::EventPublisher;
 use sos_allert::model::events::topics;
+use sos_allert::model::sos::AlertNotice;
 use sos_allert::usecase::sos::SosNotifier;
 use tokio::sync::mpsc;
 
@@ -31,12 +31,16 @@ struct ChannelNotifier {
 
 #[async_trait]
 impl SosNotifier for ChannelNotifier {
-    async fn notify(&self, recipient_ids: &[String], _alert: &Alert) -> AppResult<()> {
+    async fn notify(&self, recipient_ids: &[String], _notice: &AlertNotice) -> AppResult<()> {
         let _ = self.sender.send((recipient_ids.to_vec(), false));
         Ok(())
     }
 
-    async fn notify_recipients(&self, recipient_ids: &[String], _alert: &Alert) -> AppResult<()> {
+    async fn notify_recipients(
+        &self,
+        recipient_ids: &[String],
+        _notice: &AlertNotice,
+    ) -> AppResult<()> {
         let _ = self.sender.send((recipient_ids.to_vec(), true));
         Ok(())
     }
