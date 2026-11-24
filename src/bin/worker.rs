@@ -3,6 +3,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use sqlx::postgres::PgPoolOptions;
+
+use sos_allert::bootstrap::build_dispatcher;
 use sos_allert::config::Config;
 use sos_allert::delivery::messaging::consumer::{
     run_consumer, ConsumerOptions, ConsumerSettings, DeadLetter,
@@ -13,7 +16,6 @@ use sos_allert::delivery::messaging::handlers::{
 use sos_allert::gateway::kafka::KafkaPublisher;
 use sos_allert::gateway::publisher::EventPublisher;
 use sos_allert::model::events::topics;
-use sos_allert::usecase::sos::NoopNotifier;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -80,9 +82,15 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Push/SMS notifiers are not ported yet; the consumer still runs so the
-    // offsets advance and the wiring is exercised.
-    let sos_handler = Arc::new(SosDispatchConsumer::new(Arc::new(NoopNotifier)));
+    // The worker owns the fan-out when the web process publishes: it resolves
+    // device tokens and the sender's emergency contacts from the same database.
+    let db = PgPoolOptions::new()
+        .max_connections(config.database.pool.max)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_lazy(&config.database.dsn())
+        .map_err(|e| anyhow::anyhow!("postgres pool: {e}"))?;
+    let dispatcher = Arc::new(build_dispatcher(&config, db));
+    let sos_handler = Arc::new(SosDispatchConsumer::new(dispatcher));
     let sos_settings = ConsumerSettings {
         brokers: brokers.clone(),
         group: base_group.clone(),

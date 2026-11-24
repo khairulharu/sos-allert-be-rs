@@ -5,4 +5,5 @@
 //! interfaces, and the same boundary is kept here.
 
 pub mod kafka;
+pub mod notify;
 pub mod publisher;

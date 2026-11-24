@@ -155,6 +155,50 @@ pub struct BreadcrumbResponse {
     pub recorded_at: i64,
 }
 
+/// Everything a notification needs, including the sender's own claim.
+/// Kept separate from the entity: the claim is never stored, it only labels
+/// the push ("Pelapor menyebut: ...").
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlertNotice {
+    pub alert_id: String,
+    pub sender_id: String,
+    pub status: String,
+    pub emergency_type: String,
+    pub severity: Option<f64>,
+    pub summary: String,
+    pub client_severity: Option<f64>,
+    pub client_summary: String,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub triggered_at: i64,
+}
+
+impl From<&crate::domain::Alert> for AlertNotice {
+    fn from(alert: &crate::domain::Alert) -> Self {
+        Self {
+            alert_id: alert.id.clone(),
+            sender_id: alert.sender_id.clone(),
+            status: alert.status.clone(),
+            emergency_type: alert.emergency_type.clone(),
+            severity: alert.severity,
+            summary: alert.summary.clone().unwrap_or_default(),
+            client_severity: None,
+            client_summary: String::new(),
+            latitude: alert.latitude,
+            longitude: alert.longitude,
+            triggered_at: alert.triggered_at,
+        }
+    }
+}
+
+impl AlertNotice {
+    pub fn with_client_claim(mut self, severity: Option<f64>, summary: &str) -> Self {
+        self.client_severity = severity;
+        self.client_summary = summary.to_owned();
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SenderSummary {
     pub id: String,

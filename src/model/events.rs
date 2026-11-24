@@ -27,6 +27,25 @@ pub struct SosEvent {
     pub push_only: bool,
 }
 
+impl SosEvent {
+    /// What the workers' notifier needs, including the sender's claim.
+    pub fn to_notice(&self) -> crate::model::sos::AlertNotice {
+        crate::model::sos::AlertNotice {
+            alert_id: self.alert_id.clone(),
+            sender_id: self.sender_id.clone(),
+            status: self.status.clone(),
+            emergency_type: self.emergency_type.clone(),
+            severity: (self.severity != 0.0).then_some(self.severity),
+            summary: self.summary.clone(),
+            client_severity: self.client_severity,
+            client_summary: self.client_summary.clone(),
+            latitude: self.latitude,
+            longitude: self.longitude,
+            triggered_at: self.triggered_at,
+        }
+    }
+}
+
 fn is_zero_f64(value: &f64) -> bool {
     *value == 0.0
 }

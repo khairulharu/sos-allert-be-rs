@@ -11,7 +11,7 @@ use crate::gateway::publisher::EventPublisher;
 
 use super::consumer::{process_with_retry, ConsumerOptions, DeadLetter, InboundMessage};
 use super::handlers::SosDispatchConsumer;
-use crate::domain::Alert;
+use crate::model::sos::AlertNotice;
 use crate::usecase::sos::SosNotifier;
 
 fn message(payload: &str) -> InboundMessage {
@@ -226,7 +226,7 @@ struct CountingNotifier {
 
 #[async_trait]
 impl SosNotifier for CountingNotifier {
-    async fn notify(&self, recipient_ids: &[String], _alert: &Alert) -> AppResult<()> {
+    async fn notify(&self, recipient_ids: &[String], _notice: &AlertNotice) -> AppResult<()> {
         self.calls
             .lock()
             .unwrap()
@@ -234,7 +234,11 @@ impl SosNotifier for CountingNotifier {
         Ok(())
     }
 
-    async fn notify_recipients(&self, recipient_ids: &[String], _alert: &Alert) -> AppResult<()> {
+    async fn notify_recipients(
+        &self,
+        recipient_ids: &[String],
+        _notice: &AlertNotice,
+    ) -> AppResult<()> {
         self.calls
             .lock()
             .unwrap()

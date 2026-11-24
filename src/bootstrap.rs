@@ -9,6 +9,7 @@ use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::gateway::kafka::KafkaPublisher;
+use crate::gateway::notify::{AlertDispatcher, ApnsNotifier, FcmNotifier, TwilioNotifier};
 use crate::gateway::publisher::EventPublisher;
 use crate::repository::address_repository::PgAddressRepository;
 use crate::repository::alert_repository::PgAlertRepository;
@@ -219,6 +220,10 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         sos_case = sos_case.with_triage(Arc::new(OfflineClassifier));
     }
 
+    // Notification providers. Unconfigured channels stay log-only instead of
+    // failing the trigger.
+    sos_case = sos_case.with_notifier(Arc::new(build_dispatcher(&config, db.clone())));
+
     let sos = Arc::new(sos_case);
 
     let rate_limiter = Arc::new(RedisRateLimitRepository::new(redis.clone()));
@@ -237,6 +242,37 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         rate_limiter,
         sessions,
     })
+}
+
+/// Push/SMS dispatcher shared by the web process and the worker: both open
+/// the same database to resolve device tokens and emergency contacts.
+pub fn build_dispatcher(config: &Config, db: PgPool) -> AlertDispatcher {
+    let apns_key = if config.apns.enabled {
+        match std::fs::read(&config.apns.private_key_path) {
+            Ok(pem) => pem,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    path = %config.apns.private_key_path,
+                    "cannot read the APNs private key; APNs disabled"
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    AlertDispatcher {
+        fcm: config.fcm.enabled.then(|| FcmNotifier::new(&config.fcm)),
+        apns: Some(ApnsNotifier::new(&config.apns, apns_key)).filter(|n| n.configured()),
+        twilio: config
+            .twilio
+            .enabled
+            .then(|| TwilioNotifier::new(&config.twilio)),
+        tokens: Some(Arc::new(PgUserRepository::new(db.clone()))),
+        contacts: Some(Arc::new(PgEmergencyContactRepository::new(db))),
+    }
 }
 
 /// Dispatch outbox tick plus the housekeeping loop. Both are best effort: a

@@ -77,6 +77,15 @@ Only `sos.dispatched` has a dead-letter publisher (it needs
 `kafka.producer.enabled: true`); the entity topics drop after their retries,
 exactly like the Go worker.
 
+## Notifications
+
+`fcm`, `apns` and `twilio` are all off by default; an unconfigured channel logs
+and continues instead of failing the trigger. APNs reads
+`apns.private_key_path` (a .p8 PKCS#8 EC key); its provider token is cached for
+50 minutes — do not mint one per device, Apple answers
+`403 TooManyProviderTokenUpdates`. Provider request shapes are asserted against
+a local mock server in `src/gateway/notify/tests.rs`.
+
 ## Tests
 
 - Unit tests live in `src/<module>/tests.rs`, declared with

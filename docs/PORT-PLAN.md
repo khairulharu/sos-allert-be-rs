@@ -135,7 +135,7 @@ because it compiles.
   4), Kafka fan-out (phase 5). The use case already takes a `Notifier` and a
   `TrackHub` port, so both plug in without touching the trigger.
 
-### 4. Media and notifications (partial: media done)
+### 4. Media and notifications (partial: media + FCM/APNs/Twilio done)
 
 - `POST /api/sos/:alertId/media` (multipart, ≤25 MB, local storage backend),
   media list/get, escalation when triage widens the radius.
@@ -147,9 +147,21 @@ because it compiles.
   to `storage.local_dir`; a failed metadata insert deletes the file again, and
   a stored path cannot escape the storage root. Filename sanitizing follows the
   Go rules (tested).
-- Remaining: VAPID Web Push, FCM, APNs, Twilio SMS and the responder-roster
-  notification path. `SosNotifier` is already a port, so the fan-out does not
-  change when they land.
+- Done: the dispatcher (`AlertDispatcher`) with the same order as Go: push to
+  every recipient who has a token (FCM HTTP v1 token, else the `user_<id>`
+  topic; APNs when the user has a device token), then the emergency-contact SMS
+  fallback with a Google Maps link, capped at 10 contacts. `NotifyRecipients`
+  is push-only so an escalation never texts twice.
+  * FCM: exact Go payload (HIGH priority, `sos_alerts` channel, siren, APNs
+    critical-alert block) and `Bearer` auth.
+  * APNs: ES256 provider token cached for 50 minutes (Apple answers
+    `403 TooManyProviderTokenUpdates` when a JWT is minted per device), critical
+    alert payload with `apns-priority: 10`.
+  * Twilio: form POST with basic auth, `To`/`From`/`Body`.
+  * Unconfigured channels are log-only, never an error; only push-failed **and**
+    SMS-failed returns an error, so the worker retries or dead-letters.
+- Remaining in this phase: VAPID Web Push (needs the subscription table's
+  crypto) and the FCM/APNs token registration endpoints (`/api/push/*`).
 
 ### 5. Kafka worker (done)
 
