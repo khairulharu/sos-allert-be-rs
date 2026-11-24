@@ -18,7 +18,6 @@ use crate::bootstrap::AppState;
 use crate::delivery::http::middleware::auth::require_auth;
 use crate::delivery::http::middleware::auth_rate_limit::auth_rate_limit;
 use crate::delivery::http::middleware::classify_rate_limit::classify_rate_limit;
-use crate::delivery::http::middleware::metrics_token::require_metrics_token;
 use crate::delivery::http::{
     address_controller, contact_controller, emergency_controller, location_controller,
     push_controller, sos_controller, user_controller, ws_track,
@@ -117,10 +116,19 @@ pub fn router(state: AppState) -> Router {
         )
         .route_layer(axum_mw::from_fn_with_state(state.clone(), require_auth));
 
-    Router::new()
+    let root = Router::new()
         .route("/healthz", get(liveness))
-        .route("/healthz/ready", get(readiness))
-        .route("/metrics", get(metrics))
+        .route("/healthz/ready", get(readiness));
+
+    // `/metrics` is registered only when a token is configured, so the
+    // Prometheus body is never public (same rule as the Go service).
+    let root = if metrics_token.is_empty() {
+        root
+    } else {
+        root.route("/metrics", get(metrics))
+    };
+
+    root
         // Tracking socket: outside the HTTP auth middleware on purpose; the
         // handler does its own in-band auth and connection budgets.
         .route("/ws/sos/{alertId}/track", get(ws_track::handler))
@@ -129,10 +137,6 @@ pub fn router(state: AppState) -> Router {
         .merge(guest)
         .merge(authed)
         .with_state(state)
-        .layer(axum_mw::from_fn(move |req, next| {
-            let expected = metrics_token.clone();
-            async move { require_metrics_token(expected, req, next).await }
-        }))
 }
 
 async fn liveness() -> impl IntoResponse {
@@ -158,11 +162,22 @@ async fn readiness(State(state): State<AppState>) -> Response {
     (status, Json(body)).into_response()
 }
 
-async fn metrics() -> impl IntoResponse {
-    // Wired in phase 3 with `metrics` + `metrics-exporter-prometheus`.
+/// Prometheus exposition, guarded by `metrics.token` (raw or `Bearer`).
+async fn metrics(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    let expected = state.config.metrics.token.clone();
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+
+    if !crate::observability::token_matches(presented, &expected) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+
     (
         StatusCode::OK,
-        [("content-type", "text/plain; version=0.0.4")],
-        "# metrics endpoint wired in phase 3\n",
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        state.metrics().render(),
     )
+        .into_response()
 }

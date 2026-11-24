@@ -184,6 +184,14 @@ impl SosNotifier for NoopNotifier {
     }
 }
 
+/// Observability hooks the SOS use case records into.
+pub trait SosMetrics: Send + Sync {
+    fn observe_dispatch_duration(&self, ms: f64);
+    fn inc_push_failures(&self);
+    fn inc_fanout_failures(&self);
+    fn set_active_sos(&self, count: i64);
+}
+
 /// Live-tracking fan-out (filled in by the WebSocket hub).
 pub trait TrackHub: Send + Sync {
     fn publish(&self, alert_id: &str, payload: Vec<u8>);
@@ -238,6 +246,7 @@ pub struct SosUseCase {
     publisher: Option<Arc<dyn EventPublisher>>,
     transcriber: Option<Arc<dyn Transcriber>>,
     classify: Option<Arc<dyn PendingClassify>>,
+    metrics: Option<Arc<dyn SosMetrics>>,
     settings: SosSettings,
     now_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
@@ -257,6 +266,7 @@ impl SosUseCase {
             publisher: None,
             transcriber: None,
             classify: None,
+            metrics: None,
             settings,
             now_millis: Arc::new(crate::usecase::auth::default_now_millis),
         }
@@ -323,6 +333,11 @@ impl SosUseCase {
     /// Single-use handoff from `/api/sos/classify` to the next trigger.
     pub fn with_classify_store(mut self, store: Arc<dyn PendingClassify>) -> Self {
         self.classify = Some(store);
+        self
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<dyn SosMetrics>) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -518,6 +533,9 @@ impl SosUseCase {
             Err(e) => {
                 tracing::error!(error = %e, alert_id = %alert.id, "recipient lookup failed");
                 degraded = true;
+                if let Some(metrics) = &self.metrics {
+                    metrics.inc_fanout_failures();
+                }
                 (Vec::new(), self.widest_radius())
             }
         };
@@ -584,6 +602,7 @@ impl SosUseCase {
             tracing::warn!(alert_id = %alert.id, "degraded or empty fan-out");
         }
 
+        let started = std::time::Instant::now();
         if let Some(publisher) = &self.publisher {
             let event = SosEvent {
                 event_type: "sos.dispatched".to_string(),
@@ -618,7 +637,14 @@ impl SosUseCase {
                     .publish(topics::SOS_DISPATCHED, alert.id.as_bytes(), &payload, &[])
                     .await
                 {
-                    Ok(()) if !degraded => return,
+                    Ok(()) if !degraded => {
+                        if let Some(metrics) = &self.metrics {
+                            metrics.observe_dispatch_duration(
+                                started.elapsed().as_secs_f64() * 1000.0,
+                            );
+                        }
+                        return;
+                    }
                     Ok(()) => {}
                     Err(e) => {
                         tracing::warn!(error = %e, alert_id = %alert.id, "kafka publish failed, notifying directly")
@@ -628,8 +654,16 @@ impl SosUseCase {
         }
 
         let notice = AlertNotice::from(alert).with_client_claim(client_severity, client_summary);
+        // Measure from just before the publish/notify call, like the Go
+        // dispatcher; the outbox path would otherwise include the grace period.
         if let Err(e) = self.notifier.notify(recipients, &notice).await {
             tracing::error!(error = %e, alert_id = %alert.id, "notify failed");
+            if let Some(metrics) = &self.metrics {
+                metrics.inc_push_failures();
+            }
+        }
+        if let Some(metrics) = &self.metrics {
+            metrics.observe_dispatch_duration(started.elapsed().as_secs_f64() * 1000.0);
         }
     }
 
@@ -1604,8 +1638,15 @@ impl SosUseCase {
             }
         }
 
+        let started = std::time::Instant::now();
         if let Err(e) = self.notifier.notify_recipients(&added, &escalated).await {
             tracing::error!(error = %e, alert_id = %alert.id, "escalated notify failed");
+            if let Some(metrics) = &self.metrics {
+                metrics.inc_push_failures();
+            }
+        }
+        if let Some(metrics) = &self.metrics {
+            metrics.observe_dispatch_duration(started.elapsed().as_secs_f64() * 1000.0);
         }
         Ok(added.len())
     }
@@ -1723,6 +1764,15 @@ impl SosUseCase {
 
     pub async fn count_active(&self) -> AppResult<i64> {
         self.alerts.count_active().await
+    }
+
+    /// Refresh the active-incident gauge (the Go `RunActiveSOSGauge` loop).
+    pub async fn refresh_active_gauge(&self) -> AppResult<i64> {
+        let active = self.alerts.count_active().await?;
+        if let Some(metrics) = &self.metrics {
+            metrics.set_active_sos(active);
+        }
+        Ok(active)
     }
 
     fn publish_status(&self, alert_id: &str, status: &str, updated_at: i64) {

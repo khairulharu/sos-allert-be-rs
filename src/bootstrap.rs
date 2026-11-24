@@ -13,6 +13,7 @@ use crate::gateway::notify::{
     AlertDispatcher, ApnsNotifier, FcmNotifier, TwilioNotifier, WebPushNotifier,
 };
 use crate::gateway::publisher::EventPublisher;
+use crate::observability::Metrics;
 use crate::repository::address_repository::PgAddressRepository;
 use crate::repository::alert_repository::PgAlertRepository;
 use crate::repository::contact_repository::PgContactRepository;
@@ -53,6 +54,7 @@ pub struct AppState {
     push: Arc<PushUseCase>,
     sos: Arc<SosUseCase>,
     hub: Arc<Hub>,
+    metrics: Arc<Metrics>,
     rate_limiter: Arc<RedisRateLimitRepository>,
     sessions: Arc<CachedSessionStore>,
 }
@@ -96,6 +98,10 @@ impl AppState {
 
     pub fn hub(&self) -> &Arc<Hub> {
         &self.hub
+    }
+
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
     }
 
     pub fn emergency_contacts(&self) -> &EmergencyContactUseCase {
@@ -198,6 +204,7 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         rate_limit_disabled: config.sos.rate_limit_disabled,
         expire_after: Duration::from_secs(24 * 3600),
     };
+    let metrics = Arc::new(Metrics::new());
     let hub = Hub::new(
         config.sos.ws_max_connections,
         config.sos.ws_max_per_ip,
@@ -209,6 +216,7 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         .with_rate_limiter(Arc::new(RedisRateLimitRepository::new(redis.clone())))
         .with_users(Arc::new(PgUserRepository::new(db.clone())))
         .with_hub(hub.clone() as Arc<dyn crate::usecase::sos::TrackHub>)
+        .with_metrics(metrics.clone() as Arc<dyn crate::usecase::sos::SosMetrics>)
         .with_storage(Arc::new(LocalStorage::new(
             config.storage.local_dir.clone(),
         )));
@@ -284,6 +292,7 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         push,
         sos,
         hub,
+        metrics,
         rate_limiter,
         sessions,
     })
@@ -354,6 +363,9 @@ async fn run_sos_loops(
             _ = housekeeping.tick() => {
                 if let Err(e) = sos.housekeeping().await {
                     tracing::warn!(error = %e, "housekeeping failed");
+                }
+                if let Err(e) = sos.refresh_active_gauge().await {
+                    tracing::warn!(error = %e, "active SOS gauge refresh failed");
                 }
             }
         }

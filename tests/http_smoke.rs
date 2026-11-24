@@ -38,7 +38,9 @@ async fn healthz_is_ok() {
 }
 
 #[tokio::test]
-async fn metrics_without_token_is_open() {
+async fn metrics_is_not_registered_without_a_token() {
+    // Parity with the Go service: the route stays unregistered unless
+    // `metrics.token` is configured, so the body is never public.
     let app = router(test_state());
     let response = app
         .oneshot(
@@ -50,7 +52,7 @@ async fn metrics_without_token_is_open() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -73,7 +75,7 @@ async fn metrics_token_guard_rejects_missing_bearer() {
 }
 
 #[tokio::test]
-async fn metrics_token_guard_accepts_bearer() {
+async fn metrics_token_guard_accepts_bearer_and_renders_prometheus_text() {
     let mut config = Config::default();
     config.metrics.token = "s3cret".into();
     let app = router(build_state(config).unwrap());
@@ -83,6 +85,31 @@ async fn metrics_token_guard_accepts_bearer() {
             Request::builder()
                 .uri("/metrics")
                 .header("authorization", "Bearer s3cret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("sos_dispatch_latency_ms_count 0"), "{text}");
+    assert!(text.contains("active_sos_count 0"), "{text}");
+    assert!(text.contains("push_delivery_failures_total 0"), "{text}");
+}
+
+#[tokio::test]
+async fn metrics_token_guard_accepts_the_raw_token() {
+    let mut config = Config::default();
+    config.metrics.token = "s3cret".into();
+    let app = router(build_state(config).unwrap());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header("authorization", "s3cret")
                 .body(Body::empty())
                 .unwrap(),
         )
