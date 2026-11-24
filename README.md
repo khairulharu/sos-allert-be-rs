@@ -18,7 +18,7 @@ the Kafka worker, remote AI providers and STT are still to come; see
 | db | GORM + MySQL | sqlx + Postgres |
 | migrations | golang-migrate | sqlx::migrate (same filenames/order) |
 | sessions / geo | go-redis | redis 1.x (async) |
-| kafka | IBM/sarama | rskafka (pure Rust) — phase 5 |
+| kafka | IBM/sarama | rdkafka (librdkafka), consumer groups like sarama |
 | push | webpush-go, APNs, Twilio | `web-push`-equivalent, reqwest — phase 4 |
 | tests | `_test.go` per package | `src/<module>/tests.rs` + `tests/` |
 
@@ -51,8 +51,12 @@ the services are reachable:
 ```bash
 export TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/sos_rs
 export TEST_REDIS_URL=redis://127.0.0.1:56379
+export TEST_KAFKA_BROKERS=127.0.0.1:9092
 cargo test --all-targets
 ```
+
+`rdkafka` builds librdkafka through cmake; install `cmake` (CI does) or point
+`CMAKE` at one.
 
 Without them those tests print `skip:` and pass.
 

@@ -22,7 +22,9 @@ use validator::Validate;
 
 use crate::domain::{Alert, AlertBreadcrumb, AlertMedia, AlertResponse, User};
 use crate::error::{AppError, AppResult};
+use crate::gateway::publisher::EventPublisher;
 use crate::geo::{mask_coordinates, quantize_distance_meters};
+use crate::model::events::{topics, SosEvent};
 use crate::model::sos::{
     responder_metrics, AlertDetailResponse, AlertMediaResponse, AlertRespondedCounts,
     AlertStatusCounts, AlertSummaryResponse, BreadcrumbRequest, BreadcrumbResponse,
@@ -154,6 +156,14 @@ pub trait SosRateLimiter: Send + Sync {
 #[async_trait]
 pub trait SosNotifier: Send + Sync {
     async fn notify(&self, recipient_ids: &[String], alert: &Alert) -> AppResult<()>;
+
+    /// Push-only fan-out for a post-trigger escalation: the sender's
+    /// emergency contacts must not be texted a second time. Notifiers without
+    /// a separate surface fall back to the full fan-out, which is better than
+    /// dropping the alert (same as the Go worker).
+    async fn notify_recipients(&self, recipient_ids: &[String], alert: &Alert) -> AppResult<()> {
+        self.notify(recipient_ids, alert).await
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -217,6 +227,7 @@ pub struct SosUseCase {
     hub: Arc<dyn TrackHub>,
     triage: Option<Arc<dyn Triage>>,
     storage: Option<Arc<dyn MediaStorage>>,
+    publisher: Option<Arc<dyn EventPublisher>>,
     settings: SosSettings,
     now_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
@@ -233,6 +244,7 @@ impl SosUseCase {
             hub: Arc::new(NoopHub),
             triage: None,
             storage: None,
+            publisher: None,
             settings,
             now_millis: Arc::new(crate::usecase::auth::default_now_millis),
         }
@@ -278,6 +290,14 @@ impl SosUseCase {
     /// Optional media backend; without it uploads answer `412`.
     pub fn with_storage(mut self, storage: Arc<dyn MediaStorage>) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Kafka publisher. When set, a successful publish replaces the local
+    /// notify (the worker owns the fan-out), exactly like the Go service with
+    /// `kafka.producer.enabled: true`.
+    pub fn with_publisher(mut self, publisher: Arc<dyn EventPublisher>) -> Self {
+        self.publisher = Some(publisher);
         self
     }
 
@@ -477,7 +497,14 @@ impl SosUseCase {
         }
 
         if grace_ms <= 0 {
-            self.send_fanout(&alert, &recipients, degraded).await;
+            self.send_fanout(
+                &alert,
+                &recipients,
+                degraded,
+                request.client_severity,
+                &request.client_summary,
+            )
+            .await;
         } else {
             tracing::info!(
                 alert_id = %alert.id,
@@ -501,10 +528,61 @@ impl SosUseCase {
 
     /// Publish/notify one fan-out. `degraded` marks a failed lookup: the
     /// notifier still runs so emergency contacts are reached.
-    async fn send_fanout(&self, alert: &Alert, recipients: &[String], degraded: bool) {
+    async fn send_fanout(
+        &self,
+        alert: &Alert,
+        recipients: &[String],
+        degraded: bool,
+        client_severity: Option<f64>,
+        client_summary: &str,
+    ) {
         if degraded || recipients.is_empty() {
             tracing::warn!(alert_id = %alert.id, "degraded or empty fan-out");
         }
+
+        if let Some(publisher) = &self.publisher {
+            let event = SosEvent {
+                event_type: "sos.dispatched".to_string(),
+                alert_id: alert.id.clone(),
+                sender_id: alert.sender_id.clone(),
+                latitude: alert.latitude,
+                longitude: alert.longitude,
+                emergency_type: alert.emergency_type.clone(),
+                status: alert.status.clone(),
+                recipients: recipients.to_vec(),
+                triggered_at: alert.triggered_at,
+                severity: alert.severity.unwrap_or(0.0),
+                summary: alert.summary.clone().unwrap_or_default(),
+                client_severity,
+                client_summary: client_summary.to_owned(),
+                // A degraded fan-out has nobody to push, so the event must not
+                // make the worker run the emergency-contact SMS either: the
+                // local notifier does that once.
+                push_only: degraded,
+            };
+
+            let payload = match serde_json::to_vec(&event) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    tracing::error!(error = %e, alert_id = %alert.id, "cannot serialise SOS event");
+                    Vec::new()
+                }
+            };
+
+            if !payload.is_empty() {
+                match publisher
+                    .publish(topics::SOS_DISPATCHED, alert.id.as_bytes(), &payload, &[])
+                    .await
+                {
+                    Ok(()) if !degraded => return,
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, alert_id = %alert.id, "kafka publish failed, notifying directly")
+                    }
+                }
+            }
+        }
+
         if let Err(e) = self.notifier.notify(recipients, alert).await {
             tracing::error!(error = %e, alert_id = %alert.id, "notify failed");
         }
@@ -1329,7 +1407,7 @@ impl SosUseCase {
                         .create_recipients(&alert.id, &recipients, now)
                         .await;
                 }
-                self.send_fanout(&alert, &recipients, recipients.is_empty())
+                self.send_fanout(&alert, &recipients, recipients.is_empty(), None, "")
                     .await;
             } else {
                 tracing::info!(alert_id = %alert.id, "alert is closed, skipping dispatch");
