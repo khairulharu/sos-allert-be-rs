@@ -19,7 +19,8 @@ use crate::delivery::http::middleware::auth::require_auth;
 use crate::delivery::http::middleware::auth_rate_limit::auth_rate_limit;
 use crate::delivery::http::middleware::metrics_token::require_metrics_token;
 use crate::delivery::http::{
-    address_controller, contact_controller, location_controller, user_controller,
+    address_controller, contact_controller, emergency_controller, location_controller,
+    user_controller,
 };
 use crate::repository::health;
 
@@ -56,6 +57,10 @@ pub fn router(state: AppState) -> Router {
             get(address_controller::get)
                 .put(address_controller::update)
                 .delete(address_controller::delete),
+        )
+        .route(
+            "/api/emergency-contacts",
+            get(emergency_controller::list).post(emergency_controller::create),
         )
         .route("/api/location", get(location_controller::get))
         .route("/api/location/nearby", get(location_controller::nearby))

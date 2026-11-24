@@ -21,6 +21,7 @@
 
 pub mod address_repository;
 pub mod contact_repository;
+pub mod emergency_contact_repository;
 pub mod health;
 pub mod location_cache;
 pub mod location_repository;

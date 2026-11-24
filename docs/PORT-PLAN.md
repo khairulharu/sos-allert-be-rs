@@ -67,7 +67,7 @@ because it compiles.
   CI workflow.
 - Evidence: `cargo test --all-targets` -> 7 geo tests + 5 router smoke tests.
 
-### 1. Auth and users
+### 1. Auth and users (done)
 
 - `POST /api/users`, `POST /api/users/_login`, `GET/PATCH /api/users/_current`,
   `DELETE /api/users`.
@@ -76,19 +76,37 @@ because it compiles.
   `auth.session_cache_ttl_seconds`.
 - Auth middleware (raw token, 401 vs 503), per-IP auth rate limit + lockout
   (fails open), bcrypt verify, safe PIN set/check.
-- Acceptance: unit tests against a fake session store and `miniredis`-equivalent
-  (redis crate has no in-process fake; use a trait fake, and keep the Lua script
-  test env-gated); curl transcript for register/login/me/logout.
+- Done. Unit tests use trait fakes (the `redis` crate has no in-process
+  server); the Lua session script and the pub/sub invalidation are covered
+  against a live Redis. Verified with a live curl transcript:
+  register/login/current/logout, plus a second login invalidating the first
+  token (401 on the old one).
 
-### 2. Contacts, addresses, location
+### 2. Contacts, addresses, location (done)
 
 - CRUD for contacts and addresses scoped to the session user.
 - `PUT /api/location` (Redis GEO + `users:last_seen` + `locations` upsert),
   `GET /api/location`, `GET /api/location/nearby` (GEOSEARCH with count,
   batched `HMGET` freshness, coordinate masking).
-- Acceptance: usecase tests with fake geo store; env-gated sqlx repo test for the
-  upsert; a `nearby` test that proves one round trip per candidate set, not per
-  candidate.
+- Done. `nearby` proves one `HMGET` per candidate set (counter in the fake),
+  drops self/stale/unknown users, masks to 3 decimals and snaps distance to a
+  100 m bucket. The Postgres upsert is verified against the live database
+  (one row per user after two heartbeats).
+- Deliberate deviations from Go, both documented in code:
+  * contact search uses `ILIKE` (Postgres `LIKE` is case-sensitive, MySQL's
+    default collation was not);
+  * contact paging orders by `created_at DESC, id` — the Go service left the
+    order to the storage engine, which makes page boundaries unstable.
+- One Go behaviour carried over on purpose: `email` has no `omitempty` in the
+  Go validator, so an empty email on contact create/update is `400`. Confirmed
+  by running the exact tag through go-playground/validator v10.27.0.
+
+### 2b. Emergency contacts (done)
+
+- `GET/POST /api/emergency-contacts`: E.164 only (8-15 digits, non-zero first
+  digit), separators normalized, 10 per user, one number per user, `422` on
+  violation. Legacy non-E.164 rows stay readable and block duplicates in
+  normalized form.
 
 ### 3. SOS core
 
@@ -144,6 +162,22 @@ because it compiles.
 - Reuse `perf/k6/k6-sos-api.js` for a before/after read-mix run.
 - Write `docs/CUTOVER.md`: MySQL -> Postgres data move, session invalidation,
   and the fact that deploying the session change logs everyone out.
+
+## Test infrastructure used locally
+
+No Docker on this machine (socket is root-only, no sudo), so the services were
+installed user-space from Debian packages with `dpkg-deb -x`:
+
+```bash
+# Postgres 17.12 on 127.0.0.1:55432 (trust auth, data in ~/.local/pgdata)
+# Redis 8.0.2 on 127.0.0.1:56379
+export TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/sos_rs
+export TEST_REDIS_URL=redis://127.0.0.1:56379
+cargo test --all-targets
+```
+
+Without those variables the integration tests print a skip line and pass, so
+CI stays green on a machine with no services.
 
 ## Risks
 

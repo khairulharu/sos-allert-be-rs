@@ -17,6 +17,7 @@
 pub mod address;
 pub mod auth;
 pub mod contact;
+pub mod emergency;
 pub mod location;
 
 #[cfg(test)]

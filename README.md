@@ -4,8 +4,9 @@ Rust port of [khairulharu/sos-allert-be](https://github.com/khairulharu/sos-alle
 (the Go service), with the database moved from MySQL to **Postgres**. Same clean
 architecture, same HTTP contract, same SOS semantics.
 
-Status: **phase 0 (skeleton)**. Only health/metrics routes exist; see
-[docs/PORT-PLAN.md](docs/PORT-PLAN.md) for the phase list.
+Status: **phases 0-2** (skeleton, auth/users, contacts/addresses/location,
+emergency contacts). SOS core, media/push, the Kafka worker and AI triage are
+still to come; see [docs/PORT-PLAN.md](docs/PORT-PLAN.md).
 
 ## Stack
 
@@ -41,6 +42,17 @@ cargo test --all-targets
 
 No database is needed for these: unit tests use fakes, and the router smoke
 tests point at unreachable ports on purpose.
+
+The integration tests (HTTP + Redis Lua + GEO + Postgres upsert) run only when
+the services are reachable:
+
+```bash
+export TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/sos_rs
+export TEST_REDIS_URL=redis://127.0.0.1:56379
+cargo test --all-targets
+```
+
+Without them those tests print `skip:` and pass.
 
 ## Layout
 

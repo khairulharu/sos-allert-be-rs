@@ -10,6 +10,7 @@ use sqlx::PgPool;
 use crate::config::Config;
 use crate::repository::address_repository::PgAddressRepository;
 use crate::repository::contact_repository::PgContactRepository;
+use crate::repository::emergency_contact_repository::PgEmergencyContactRepository;
 use crate::repository::location_cache::RedisLocationCacheRepository;
 use crate::repository::location_repository::PgLocationRepository;
 use crate::repository::rate_limit::RedisRateLimitRepository;
@@ -19,6 +20,7 @@ use crate::repository::user_repository::PgUserRepository;
 use crate::usecase::address::AddressUseCase;
 use crate::usecase::auth::{AuthUseCase, SessionStore};
 use crate::usecase::contact::ContactUseCase;
+use crate::usecase::emergency::EmergencyContactUseCase;
 use crate::usecase::location::LocationUseCase;
 
 #[derive(Clone)]
@@ -30,6 +32,7 @@ pub struct AppState {
     contacts: Arc<ContactUseCase>,
     addresses: Arc<AddressUseCase>,
     locations: Arc<LocationUseCase>,
+    emergency_contacts: Arc<EmergencyContactUseCase>,
     rate_limiter: Arc<RedisRateLimitRepository>,
     sessions: Arc<CachedSessionStore>,
 }
@@ -61,6 +64,10 @@ impl AppState {
 
     pub fn locations(&self) -> &LocationUseCase {
         &self.locations
+    }
+
+    pub fn emergency_contacts(&self) -> &EmergencyContactUseCase {
+        &self.emergency_contacts
     }
 
     pub fn rate_limiter(&self) -> &RedisRateLimitRepository {
@@ -129,6 +136,10 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         Some(Arc::new(PgLocationRepository::new(db.clone()))),
     ));
 
+    let emergency_contacts = Arc::new(EmergencyContactUseCase::new(Arc::new(
+        PgEmergencyContactRepository::new(db.clone()),
+    )));
+
     let rate_limiter = Arc::new(RedisRateLimitRepository::new(redis.clone()));
 
     Ok(AppState {
@@ -139,6 +150,7 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         contacts,
         addresses,
         locations,
+        emergency_contacts,
         rate_limiter,
         sessions,
     })

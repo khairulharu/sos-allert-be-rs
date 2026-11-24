@@ -3,4 +3,5 @@
 mod address;
 mod auth;
 mod contact;
+mod emergency;
 mod location;

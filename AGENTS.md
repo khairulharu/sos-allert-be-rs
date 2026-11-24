@@ -45,6 +45,21 @@ cargo test --all-targets
   error yields an empty list, `recipients_notified: 0`, and still runs the
   notifier. Only an alert-persist failure is a 5xx.
 
+## Local test services
+
+Docker is not usable on this machine (socket is root-only). Postgres and Redis
+were installed user-space; start them before integration tests:
+
+```bash
+PGBIN=$HOME/.local/pgsrv/usr/lib/postgresql/17/bin
+LD_LIBRARY_PATH=$HOME/.local/pgsrv/usr/lib/x86_64-linux-gnu   $PGBIN/pg_ctl -D $HOME/.local/pgdata -l /tmp/opencode/pg.log   -o "-p 55432 -k /tmp/opencode -c listen_addresses=127.0.0.1" start
+LD_LIBRARY_PATH=$HOME/.local/pgsrv/usr/lib/x86_64-linux-gnu \
+  $HOME/.local/pgsrv/usr/bin/redis-server --port 56379 --bind 127.0.0.1 \
+  --dir $HOME/.local/redis --daemonize yes --save '' --appendonly no
+export TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/sos_rs
+export TEST_REDIS_URL=redis://127.0.0.1:56379
+```
+
 ## Tests
 
 - Unit tests live in `src/<module>/tests.rs`, declared with

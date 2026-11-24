@@ -2,6 +2,7 @@
 
 pub mod address_controller;
 pub mod contact_controller;
+pub mod emergency_controller;
 pub mod location_controller;
 pub mod middleware;
 pub mod routes;
