@@ -207,6 +207,7 @@ async fn classify_transcribes_triages_and_hands_off_to_the_trigger() {
     .await;
     assert_eq!(status, 400);
 
+    cleanup_geo(&h.state, &[&user]).await;
     delete_user(&h.state, &user).await;
 }
 
@@ -261,6 +262,7 @@ async fn classify_is_rate_limited_per_user() {
     assert_eq!(status, 429, "{body}");
     assert!(body["errors"].as_str().unwrap().contains("rate limit"));
 
+    cleanup_geo(&h.state, &[&user]).await;
     delete_user(&h.state, &user).await;
 }
 
@@ -324,5 +326,6 @@ async fn media_upload_transcribes_and_updates_the_alert_triage() {
     assert_eq!(row.0, "ACCIDENT");
     assert_eq!(row.1, Some(0.6));
 
+    cleanup_geo(&h.state, &[&user]).await;
     delete_user(&h.state, &user).await;
 }

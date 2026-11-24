@@ -92,6 +92,7 @@ async fn auth_in_band_then_location_updates_arrive() {
     assert_eq!(value["alert_id"], alert_id);
 
     let _ = socket.close(None).await;
+    cleanup_geo(&h.state, &[&sender]).await;
     delete_user(&h.state, &sender).await;
 }
 
@@ -208,5 +209,6 @@ async fn per_user_socket_budget_is_enforced() {
     assert!(text.contains("too many tracking connections"), "got {text}");
 
     let _ = first.close(None).await;
+    cleanup_geo(&h.state, &[&sender]).await;
     delete_user(&h.state, &sender).await;
 }

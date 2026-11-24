@@ -98,6 +98,7 @@ async fn heartbeat_then_status_and_nearby() {
         .unwrap();
     assert_eq!(rows, 1);
 
+    cleanup_geo(&h.state, &[&me, &other]).await;
     delete_user(&h.state, &me).await;
     delete_user(&h.state, &other).await;
 }
@@ -211,6 +212,7 @@ async fn stale_heartbeat_is_dropped_from_nearby() {
     let (_, body) = send(&h.app, "GET", "/api/location", Some(&other_token), None).await;
     assert_eq!(body["data"]["stale"], true);
 
+    cleanup_geo(&h.state, &[&me, &other]).await;
     delete_user(&h.state, &me).await;
     delete_user(&h.state, &other).await;
 }

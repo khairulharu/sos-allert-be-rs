@@ -201,6 +201,7 @@ async fn trigger_detail_respond_resolve_history_summary() {
     assert_eq!(body["data"]["responded"]["total"], 1);
     assert_eq!(body["data"]["received"]["total"], 1);
 
+    cleanup_geo(&h.state, &[&sender, &responder, &stranger]).await;
     delete_user(&h.state, &sender).await;
     delete_user(&h.state, &responder).await;
     delete_user(&h.state, &stranger).await;
@@ -291,6 +292,7 @@ async fn idempotency_key_replays_the_same_alert() {
     assert_eq!(count, 1, "a replayed key created a second alert");
 
     let _ = ask;
+    cleanup_geo(&h.state, &[&sender]).await;
     delete_user(&h.state, &sender).await;
 }
 
@@ -415,16 +417,27 @@ async fn grace_period_defers_then_the_outbox_dispatches() {
         .unwrap();
     assert!(due.is_some(), "dispatch_due_at was not persisted");
 
-    // Not due yet: the outbox scan finds nothing.
-    assert_eq!(h.state.sos().dispatch_due(10).await.unwrap(), 0);
+    // The scan is global, and other tests (or earlier runs) may have due
+    // alerts, so assert on this row instead of the total.
+    let dispatched_before: Option<i64> =
+        sqlx::query_scalar("SELECT dispatched_at FROM alerts WHERE id = $1")
+            .bind(&alert_id)
+            .fetch_one(h.state.db())
+            .await
+            .unwrap();
+    assert!(
+        dispatched_before.is_none(),
+        "nothing dispatches during grace"
+    );
 
-    // Force the due time into the past, then the scan dispatches once.
+    // Force the due time into the past, then the scan dispatches it.
     sqlx::query("UPDATE alerts SET dispatch_due_at = dispatch_due_at - 60000 WHERE id = $1")
         .bind(&alert_id)
         .execute(h.state.db())
         .await
         .unwrap();
-    assert_eq!(h.state.sos().dispatch_due(10).await.unwrap(), 1);
+    let dispatched = h.state.sos().dispatch_due(10).await.unwrap();
+    assert!(dispatched >= 1, "the outbox scan found nothing");
 
     let dispatched_at: Option<i64> =
         sqlx::query_scalar("SELECT dispatched_at FROM alerts WHERE id = $1")
@@ -434,9 +447,17 @@ async fn grace_period_defers_then_the_outbox_dispatches() {
             .unwrap();
     assert!(dispatched_at.is_some());
 
-    // A second scan is a no-op: the latch holds.
-    assert_eq!(h.state.sos().dispatch_due(10).await.unwrap(), 0);
+    // The latch holds: a second scan cannot dispatch this row again.
+    h.state.sos().dispatch_due(10).await.unwrap();
+    let dispatched_at_again: Option<i64> =
+        sqlx::query_scalar("SELECT dispatched_at FROM alerts WHERE id = $1")
+            .bind(&alert_id)
+            .fetch_one(h.state.db())
+            .await
+            .unwrap();
+    assert_eq!(dispatched_at, dispatched_at_again);
 
+    cleanup_geo(&h.state, &[&sender, &responder]).await;
     delete_user(&h.state, &sender).await;
     delete_user(&h.state, &responder).await;
 }
@@ -681,6 +702,7 @@ async fn media_upload_list_and_download() {
     .await;
     assert_eq!(status, 403);
 
+    cleanup_geo(&h.state, &[&sender, &responder, &stranger]).await;
     delete_user(&h.state, &sender).await;
     delete_user(&h.state, &responder).await;
     delete_user(&h.state, &stranger).await;

@@ -140,13 +140,40 @@ pub async fn send(
     (status, json)
 }
 
-/// A geographic area far enough from other tests (~0.5 deg grid) that leftover
-/// GEO entries from another run cannot join this test's fan-out.
+/// A geographic area on a fine grid (0.05 deg ~ 5.5 km) so a test rarely
+/// shares a cell with another run. Fan-out searches reach at most 5 km, so
+/// tests in different cells cannot see each other.
 pub fn unique_area() -> (f64, f64) {
     let bytes = uuid::Uuid::new_v4().into_bytes();
-    let lon = 90.0 + (bytes[0] as f64 % 100.0) * 0.5;
-    let lat = -20.0 + (bytes[1] as f64 % 80.0) * 0.5;
-    (lon, lat)
+    let lon = 95.0 + (u16::from(bytes[0]) << 8 | u16::from(bytes[1])) as f64 % 50_000.0 / 1000.0;
+    let lat = -15.0 + (u16::from(bytes[2]) << 8 | u16::from(bytes[3])) as f64 % 30_000.0 / 1000.0;
+    // Quantise to the grid so nearby-but-not-equal coordinates still land on
+    // a distinct, non-overlapping area.
+    ((lon * 20.0).round() / 20.0, (lat * 20.0).round() / 20.0)
+}
+
+/// Remove test users from the Redis GEO set and last_seen hash so a later run
+/// cannot inherit them as recipients.
+pub async fn cleanup_geo(state: &AppState, user_ids: &[&str]) {
+    let Ok(mut conn) = state
+        .redis_client()
+        .get_multiplexed_async_connection()
+        .await
+    else {
+        return;
+    };
+    for id in user_ids {
+        let _: Result<i64, _> = redis::cmd("ZREM")
+            .arg("users:locations")
+            .arg(*id)
+            .query_async(&mut conn)
+            .await;
+        let _: Result<i64, _> = redis::cmd("HDEL")
+            .arg("users:last_seen")
+            .arg(*id)
+            .query_async(&mut conn)
+            .await;
+    }
 }
 
 pub fn unique_id(prefix: &str) -> String {
