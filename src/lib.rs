@@ -21,6 +21,7 @@ pub mod error;
 pub mod gateway;
 pub mod geo;
 pub mod model;
+pub mod observability;
 pub mod repository;
 pub mod storage;
 pub mod tracking;

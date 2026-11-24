@@ -85,3 +85,5 @@ migrations/        Postgres, same versions as the Go repo
 - Passwords and the safe PIN are bcrypt, so hashes imported from MySQL still
   verify.
 - Triage severity `NULL` means "never classified"; `0` is a real score.
+- `/metrics` exists only when `metrics.token` is set; send the token raw or as
+  `Bearer <token>`.

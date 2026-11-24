@@ -246,6 +246,15 @@ because it compiles.
 - Write `docs/CUTOVER.md`: MySQL -> Postgres data move, session invalidation,
   and the fact that deploying the session change logs everyone out.
 
+## Observability
+
+Ported from `internal/metrics`: a dependency-free Prometheus exposition with
+`/metrics` registered **only when `metrics.token` is set** (raw token or
+`Bearer`), so the body is never public. Series: `sos_dispatch_latency_ms`
+histogram (50/100/150/200/500/1000/2000 ms buckets, measured around the
+publish/notify call), `push_delivery_failures_total`,
+`sos_fanout_failures_total` and `active_sos_count` (refreshed with housekeeping).
+
 ## Test infrastructure used locally
 
 No Docker on this machine (socket is root-only, no sudo), so the services were

@@ -86,6 +86,12 @@ and continues instead of failing the trigger. APNs reads
 `403 TooManyProviderTokenUpdates`. Provider request shapes are asserted against
 a local mock server in `src/gateway/notify/tests.rs`.
 
+## Metrics
+
+`/metrics` is registered only when `metrics.token` is non-empty, and the token
+is compared in constant time (raw or `Bearer`). Never make it public: it exposes
+incident counts.
+
 ## Web Push
 
 `webpush.*` in config: VAPID public/private keys (base64url, raw P-256 scalar),
