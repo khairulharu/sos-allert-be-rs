@@ -24,6 +24,9 @@ async fn main() -> anyhow::Result<()> {
     let port = config.web_port();
     let state = bootstrap::build_state(config)?;
 
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    state.spawn_background(shutdown_rx);
+
     let app = routes::router(state);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr)
@@ -32,9 +35,15 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(%addr, "web listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await;
+
+    let _ = shutdown_tx.send(true);
+    result?;
 
     tracing::info!("web stopped");
     Ok(())
@@ -49,9 +58,8 @@ fn init_tracing() {
         .try_init();
 }
 
-/// SIGINT/SIGTERM drain the listener; in-flight requests get axum's default
-/// grace. Background loops (dispatch outbox, housekeeping) land in phase 3 and
-/// will take this same signal.
+/// SIGINT/SIGTERM drain the listener; the accept loop stops and background
+/// loops see the shutdown flag.
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;

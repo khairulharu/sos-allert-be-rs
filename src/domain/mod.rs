@@ -16,6 +16,6 @@ pub use alert::{
     Alert, AlertBreadcrumb, AlertMedia, AlertRecipient, AlertResponse, EmergencyContact,
 };
 pub use contact::Contact;
-pub use location::Location;
+pub use location::{Location, LocationCache};
 pub use push::PushSubscription;
 pub use user::User;

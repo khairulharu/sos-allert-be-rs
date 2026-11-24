@@ -40,5 +40,26 @@ fn to_rad(deg: f64) -> f64 {
     (deg * std::f64::consts::PI) / 180.0
 }
 
+/// Round a position to ~100 m (3 decimal degrees) so an unconfirmed crowd
+/// responder never sees a victim's exact address.
+pub fn mask_coordinates(latitude: f64, longitude: f64) -> (f64, f64) {
+    (round3(latitude), round3(longitude))
+}
+
+fn round3(value: f64) -> f64 {
+    const FACTOR: f64 = 1000.0;
+    if value >= 0.0 {
+        (value * FACTOR + 0.5).trunc() / FACTOR
+    } else {
+        -((-value * FACTOR + 0.5).trunc()) / FACTOR
+    }
+}
+
+/// Snap a distance to its nearest 100 m bucket, so the label stays usable
+/// while two bearings from two vantages no longer intersect at a point.
+pub fn quantize_distance_meters(meters: f64) -> i64 {
+    (((meters + 50.0) / 100.0) as i64) * 100
+}
+
 #[cfg(test)]
 mod tests;

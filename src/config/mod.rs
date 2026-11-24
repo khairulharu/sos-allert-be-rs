@@ -79,6 +79,8 @@ pub struct DatabaseConfig {
     pub host: String,
     pub port: u16,
     pub name: String,
+    /// `require` (hosted Postgres), `disable` (local test instance).
+    pub sslmode: String,
     pub pool: PoolConfig,
 }
 
@@ -90,6 +92,7 @@ impl Default for DatabaseConfig {
             host: "127.0.0.1".into(),
             port: 5432,
             name: "postgres".into(),
+            sslmode: "require".into(),
             pool: PoolConfig::default(),
         }
     }
@@ -126,21 +129,28 @@ impl PoolConfig {
 }
 
 impl DatabaseConfig {
-    /// `postgres://user:pass@host:port/db?sslmode=require`.
+    /// `postgres://user:pass@host:port/db?sslmode=<configured>`.
     ///
-    /// Supabase requires TLS; the pooler port (6543) is used in production.
+    /// Supabase requires TLS (`require`, the default); a local test instance
+    /// sets `disable`.
     pub fn dsn(&self) -> String {
+        let sslmode = if self.sslmode.is_empty() {
+            "require"
+        } else {
+            self.sslmode.as_str()
+        };
         format!(
-            "postgres://{}:{}@{}:{}/{}?sslmode=require",
+            "postgres://{}:{}@{}:{}/{}?sslmode={}",
             urlencode(&self.username),
             urlencode(&self.password),
             self.host,
             self.port,
-            self.name
+            self.name,
+            sslmode
         )
     }
 
-    /// `postgres://.../db?sslmode=disable`, for local test databases.
+    /// `postgres://.../db` with no TLS parameters, for local test databases.
     pub fn dsn_no_tls(&self) -> String {
         format!(
             "postgres://{}:{}@{}:{}/{}",

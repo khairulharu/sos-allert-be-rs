@@ -19,4 +19,15 @@
 //! per-aggregate impls here; sqlx has no GORM-style enum of dialect quirks to
 //! inherit, and explicit SQL is what keeps the radius queries off a seq scan.
 
+pub mod address_repository;
+pub mod contact_repository;
 pub mod health;
+pub mod location_cache;
+pub mod location_repository;
+pub mod rate_limit;
+pub mod redis_conn;
+pub mod session;
+pub mod user_repository;
+
+#[cfg(test)]
+mod tests;

@@ -94,3 +94,37 @@ impl From<validator::ValidationErrors> for AppError {
         AppError::Validation(value.to_string())
     }
 }
+
+/// Render as the documented `{"errors": "..."}` body. Every 5xx is replaced
+/// with the generic message and the detail is logged, exactly like the Go
+/// `NewErrorHandler`.
+impl axum::response::IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        use axum::http::StatusCode;
+        use axum::response::Json;
+
+        let status =
+            StatusCode::from_u16(self.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let retry_after = self.retry_after_s();
+
+        let message = if status.is_server_error() {
+            tracing::error!(error = %self, "internal error");
+            "internal server error".to_string()
+        } else {
+            self.to_string()
+        };
+
+        let mut response = (
+            status,
+            Json(crate::model::ErrorResponse { errors: message }),
+        )
+            .into_response();
+
+        if let Some(seconds) = retry_after {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&seconds.max(1).to_string()) {
+                response.headers_mut().insert("retry-after", value);
+            }
+        }
+        response
+    }
+}

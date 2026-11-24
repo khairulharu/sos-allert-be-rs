@@ -20,6 +20,7 @@ pub mod domain;
 pub mod error;
 pub mod gateway;
 pub mod geo;
+pub mod model;
 pub mod repository;
 pub mod usecase;
 
