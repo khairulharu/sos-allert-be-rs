@@ -12,6 +12,7 @@ async fn heartbeat_then_status_and_nearby() {
     let other = unique_id("rs-other");
     let my_token = signup_and_login(&h.app, &me, "p").await;
     let other_token = signup_and_login(&h.app, &other, "p").await;
+    let (lon, lat) = unique_area();
 
     // No heartbeat yet.
     let (status, _) = send(&h.app, "GET", "/api/location", Some(&my_token), None).await;
@@ -22,7 +23,7 @@ async fn heartbeat_then_status_and_nearby() {
         "PUT",
         "/api/location",
         Some(&my_token),
-        Some(serde_json::json!({"longitude": 106.8, "latitude": -6.2})),
+        Some(serde_json::json!({"longitude": lon, "latitude": lat})),
     )
     .await;
     assert_eq!(status, 200, "body: {body}");
@@ -34,7 +35,7 @@ async fn heartbeat_then_status_and_nearby() {
     // Redis GEO stores a 52-bit geohash per axis, so a coordinate comes back
     // within ~1e-5 degrees, not bit-identical.
     let latitude = body["data"]["latitude"].as_f64().unwrap();
-    assert!((latitude + 6.2).abs() < 1e-4, "latitude {latitude}");
+    assert!((latitude - lat).abs() < 1e-4, "latitude {latitude}");
 
     // The other user is ~700 m away; the history row must exist too.
     send(
@@ -42,7 +43,7 @@ async fn heartbeat_then_status_and_nearby() {
         "PUT",
         "/api/location",
         Some(&other_token),
-        Some(serde_json::json!({"longitude": 106.8063, "latitude": -6.2028})),
+        Some(serde_json::json!({"longitude": lon + 0.0063, "latitude": lat + 0.0028})),
     )
     .await;
 
@@ -60,14 +61,19 @@ async fn heartbeat_then_status_and_nearby() {
     let found = responders
         .iter()
         .find(|r| r["user_id"] == other)
-        .expect("other user missing from nearby");
+        .unwrap_or_else(|| panic!("other user missing from nearby; body={body}"));
     // Masked to 3 decimals and distance snapped to a 100 m bucket.
     let masked_lat = found["latitude"].as_f64().unwrap();
     let masked_lon = found["longitude"].as_f64().unwrap();
-    assert!((masked_lat + 6.203).abs() < 1e-4, "masked lat {masked_lat}");
+    let expect_lat = ((lat + 0.0028) * 1000.0).round() / 1000.0;
+    let expect_lon = ((lon + 0.0063) * 1000.0).round() / 1000.0;
     assert!(
-        (masked_lon - 106.806).abs() < 1e-4,
-        "masked lon {masked_lon}"
+        (masked_lat - expect_lat).abs() < 1e-4,
+        "masked lat {masked_lat} expect {expect_lat}"
+    );
+    assert!(
+        (masked_lon - expect_lon).abs() < 1e-4,
+        "masked lon {masked_lon} expect {expect_lon}"
     );
     // Masking keeps 3 decimals only.
     assert_eq!((masked_lat * 1000.0).round() / 1000.0, masked_lat);
@@ -88,7 +94,7 @@ async fn heartbeat_then_status_and_nearby() {
         "PUT",
         "/api/location",
         Some(&my_token),
-        Some(serde_json::json!({"longitude": 106.9, "latitude": -6.3})),
+        Some(serde_json::json!({"longitude": lon + 0.1, "latitude": lat - 0.1})),
     )
     .await;
     let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM locations WHERE user_id = $1")
@@ -108,13 +114,14 @@ async fn location_validation_and_radius_bounds() {
     let Some(h) = harness().await else { return };
     let me = unique_id("rs-locval");
     let token = signup_and_login(&h.app, &me, "p").await;
+    let (lon, lat) = unique_area();
 
     let (status, _) = send(
         &h.app,
         "PUT",
         "/api/location",
         Some(&token),
-        Some(serde_json::json!({"longitude": 106.8})),
+        Some(serde_json::json!({"longitude": lon})),
     )
     .await;
     assert_eq!(status, 400, "latitude is required");
@@ -124,7 +131,7 @@ async fn location_validation_and_radius_bounds() {
         "PUT",
         "/api/location",
         Some(&token),
-        Some(serde_json::json!({"longitude": 200.0, "latitude": -6.2})),
+        Some(serde_json::json!({"longitude": 200.0, "latitude": lat})),
     )
     .await;
     assert_eq!(status, 400, "longitude is out of range");
@@ -134,7 +141,7 @@ async fn location_validation_and_radius_bounds() {
         "PUT",
         "/api/location",
         Some(&token),
-        Some(serde_json::json!({"longitude": 106.8, "latitude": -6.2})),
+        Some(serde_json::json!({"longitude": lon, "latitude": lat})),
     )
     .await;
 
@@ -168,9 +175,14 @@ async fn stale_heartbeat_is_dropped_from_nearby() {
     let other = unique_id("rs-stale-other");
     let my_token = signup_and_login(&h.app, &me, "p").await;
     let other_token = signup_and_login(&h.app, &other, "p").await;
+    let (lon, lat) = unique_area();
+    let area_lon = lon;
+    let area_lat = lat;
 
-    for (token, longitude, latitude) in [(&my_token, 106.8, -6.2), (&other_token, 106.801, -6.201)]
-    {
+    for (token, longitude, latitude) in [
+        (&my_token, area_lon, area_lat),
+        (&other_token, area_lon + 0.001, area_lat + 0.001),
+    ] {
         send(
             &h.app,
             "PUT",
