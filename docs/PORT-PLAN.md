@@ -108,7 +108,7 @@ because it compiles.
   violation. Legacy non-E.164 rows stay readable and block duplicates in
   normalized form.
 
-### 3. SOS core
+### 3. SOS core (done)
 
 - `trigger_sos`: idempotency before the limiter, per-user hourly limit,
   adaptive radius (1/2/5 km, cap 50), persist then fail-open fan-out,
@@ -121,9 +121,17 @@ because it compiles.
 - `WS /ws/sos/:alertId/track` with in-band auth frame, connection budgets
   (global/per-IP/per-user), 5 s write deadline, 25 s ping / 60 s pong.
 - Metrics: active-SOS gauge, fan-out failures.
-- Acceptance: ported Go tests for outbox (due scan, exactly-once mark, cancel
-  skip, restart recovery, fail-open), guard/idempotency, and a live ws client
-  transcript.
+- Done, verified with the ported Go test set plus HTTP/WS integration tests:
+  idempotent replay before the limiter, claim release after a failed trigger,
+  fail-open recipient lookup, adaptive radius (triage severity starts the
+  fan-out wider), grace-period outbox with the `dispatched_at` latch, cancel
+  with the bcrypt safe PIN (412 when unset, 409 on a second cancel),
+  acknowledge/resolve/respond (unique answer -> 409), breadcrumbs (24 h past ->
+  400, future clamped), history/summary, and the tracking socket with in-band
+  auth, live LOCATION_UPDATE, and the global/per-IP/per-user budgets.
+- Not ported yet in this phase: media upload and the push/SMS notifiers (phase
+  4), Kafka fan-out (phase 5). The use case already takes a `Notifier` and a
+  `TrackHub` port, so both plug in without touching the trigger.
 
 ### 4. Media and notifications
 
@@ -143,7 +151,7 @@ because it compiles.
 - Acceptance: consumer tests against a fake broker abstraction; one integration
   run against a real broker env-gated.
 
-### 6. AI triage and STT
+### 6. AI triage and STT (partial: offline classifier done)
 
 - Offline keyword classifier first, then jev > openai > ollama chain, fail-open,
   severity clamping, `severity`/`summary` persistence (0 is a real score).
@@ -151,8 +159,15 @@ because it compiles.
   compression ratio, hallucination phrases), `transcription_status = empty`.
 - `POST /api/sos/classify` (rate limited, fails closed with 503) and
   `pendingClassify` single-use Redis handoff.
-- Acceptance: ported classifier/chain tests with a stub HTTP client; no live
-  provider calls in CI.
+- Done: the deterministic offline classifier, ported 1:1 (keyword tables
+  generated from the Go source), wired into the trigger: severity picks the
+  starting radius, an explicit `emergency_type` wins over the classifier, and a
+  description with no signal stores no triage. Covered by the full Go case
+  table plus HTTP tests.
+- Remaining in this phase: the jev/openai/ollama HTTP providers and
+  `POST /api/sos/classify` + Whisper STT (silence sentinel). With `ai.provider`
+  set to a remote provider today, the service logs a warning and uses the
+  offline classifier instead of losing triage.
 
 ### 7. Parity and cutover notes
 

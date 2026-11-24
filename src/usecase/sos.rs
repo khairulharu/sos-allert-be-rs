@@ -30,6 +30,7 @@ use crate::model::sos::{
     SearchAlertHistoryRequest, SenderSummary, SosCreatedResponse, TriageInfo, TriggerSosRequest,
 };
 use crate::usecase::auth::UserStore;
+use crate::usecase::triage::{radius_start_index, Triage};
 
 /// Stale after 2 minutes, the same cutoff used for nearby and fan-out.
 pub const STALE_THRESHOLD_MS: i64 = 2 * 60 * 1000;
@@ -200,6 +201,7 @@ pub struct SosUseCase {
     notifier: Arc<dyn SosNotifier>,
     users: Option<Arc<dyn UserStore>>,
     hub: Arc<dyn TrackHub>,
+    triage: Option<Arc<dyn Triage>>,
     settings: SosSettings,
     now_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
@@ -214,6 +216,7 @@ impl SosUseCase {
             notifier: Arc::new(NoopNotifier),
             users: None,
             hub: Arc::new(NoopHub),
+            triage: None,
             settings,
             now_millis: Arc::new(crate::usecase::auth::default_now_millis),
         }
@@ -246,6 +249,13 @@ impl SosUseCase {
 
     pub fn with_hub(mut self, hub: Arc<dyn TrackHub>) -> Self {
         self.hub = hub;
+        self
+    }
+
+    /// Optional classifier; without it the trigger keeps the request defaults
+    /// and no triage is invented.
+    pub fn with_triage(mut self, triage: Arc<dyn Triage>) -> Self {
+        self.triage = Some(triage);
         self
     }
 
@@ -358,10 +368,27 @@ impl SosUseCase {
         let (latitude, longitude) = self.resolve_coordinates(sender_id, request).await?;
         let now = (self.now_millis)();
 
-        let emergency_type = if request.emergency_type.is_empty() {
-            "DANGER".to_string()
-        } else {
+        // Optional triage. Fail-open: a provider error keeps the request
+        // defaults, because a life-safety alert never waits on AI.
+        let triage = match &self.triage {
+            Some(engine) if !request.description.trim().is_empty() => {
+                engine.triage(&request.description).await
+            }
+            _ => Default::default(),
+        };
+        let has_triage = triage.is_signal();
+
+        let emergency_type = if !request.emergency_type.is_empty() {
             request.emergency_type.clone()
+        } else if has_triage {
+            triage.emergency_type.clone()
+        } else {
+            "DANGER".to_string()
+        };
+        let radius_start = if has_triage {
+            radius_start_index(triage.severity, self.settings.radii.len())
+        } else {
+            0
         };
 
         let grace_ms = self.settings.grace_period.as_millis() as i64;
@@ -373,8 +400,12 @@ impl SosUseCase {
             triggered_at: now,
             status: crate::domain::alert::status::TRIGGERED.to_string(),
             emergency_type,
-            severity: None,
-            summary: None,
+            severity: has_triage.then_some(triage.severity),
+            summary: if triage.summary.is_empty() {
+                None
+            } else {
+                Some(triage.summary.clone())
+            },
             accuracy_meters: request.accuracy_meters.map(|v| v as f32),
             battery_percentage: request.battery_percentage,
             cancellation_reason: None,
@@ -394,7 +425,7 @@ impl SosUseCase {
         // empty recipient list instead of a 500 that notifies nobody.
         let mut degraded = false;
         let (recipients, radius) = match self
-            .find_recipients(sender_id, longitude, latitude, 0)
+            .find_recipients(sender_id, longitude, latitude, radius_start)
             .await
         {
             Ok(found) => found,
@@ -440,7 +471,7 @@ impl SosUseCase {
             grace_period_seconds: self.settings.grace_period.as_secs(),
             recipients_notified: recipients.len(),
             triggered_at: alert.triggered_at,
-            triage: None,
+            triage: has_triage.then(|| triage.clone().into_info()),
             client_severity: request.client_severity,
             client_summary: request.client_summary.clone(),
         })

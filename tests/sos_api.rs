@@ -476,3 +476,65 @@ async fn per_user_rate_limit_is_429() {
 
     delete_user(&h.state, &sender).await;
 }
+
+#[tokio::test]
+async fn description_triage_is_returned_and_persisted() {
+    let Some(h) = harness_custom(|cfg| {
+        cfg.sos.grace_period_seconds = 0;
+        cfg.ai.enabled = true;
+        cfg.ai.provider = "offline".into();
+    })
+    .await
+    else {
+        return;
+    };
+    let sender = unique_id("rs-triage");
+    let token = signup_and_login(&h.app, &sender, "p").await;
+    let (lon, lat) = unique_area();
+
+    let (status, body) = send(
+        &h.app,
+        "POST",
+        "/api/sos",
+        Some(&token),
+        Some(serde_json::json!({
+            "longitude": lon,
+            "latitude": lat,
+            "description": "ada orang pingsan di pantai"
+        })),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["data"]["triage"]["emergency_type"], "MEDICAL");
+    assert_eq!(body["data"]["triage"]["severity"], 0.6);
+
+    let alert_id = body["data"]["alert_id"].as_str().unwrap().to_owned();
+    let row: (String, Option<f64>, Option<String>) =
+        sqlx::query_as("SELECT emergency_type, severity, summary FROM alerts WHERE id = $1")
+            .bind(&alert_id)
+            .fetch_one(h.state.db())
+            .await
+            .unwrap();
+    assert_eq!(row.0, "MEDICAL");
+    assert_eq!(row.1, Some(0.6));
+    assert!(row.2.unwrap().contains("pingsan"));
+
+    // A description with no signal leaves no triage and the default type.
+    let (status, body) = send(
+        &h.app,
+        "POST",
+        "/api/sos",
+        Some(&token),
+        Some(serde_json::json!({
+            "longitude": lon,
+            "latitude": lat,
+            "description": "mau beli kopi dulu"
+        })),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert!(body["data"].get("triage").is_none());
+    assert_eq!(body["data"]["status"], "TRIGGERED");
+
+    delete_user(&h.state, &sender).await;
+}

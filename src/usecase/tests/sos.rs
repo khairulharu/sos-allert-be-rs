@@ -20,6 +20,7 @@ use crate::usecase::sos::{
     AlertStore, AlertUpdate, SosIdempotency, SosLocationStore, SosNotifier, SosRateLimiter,
     SosSettings, SosUseCase, TrackHub,
 };
+use crate::usecase::triage::OfflineClassifier;
 
 const NOW: i64 = 1_700_000_000_000;
 
@@ -638,6 +639,11 @@ impl Harness {
             hub,
             users,
         }
+    }
+
+    fn with_triage(mut self) -> Self {
+        self.case = self.case.with_triage(Arc::new(OfflineClassifier));
+        self
     }
 
     fn zero_grace() -> SosSettings {
@@ -1400,4 +1406,100 @@ fn triage_type_is_serialized_only_when_present() {
     let json = serde_json::to_value(&empty).unwrap();
     assert_eq!(json["severity"], 0.0);
     assert!(json.get("emergency_type").is_none());
+}
+
+#[tokio::test]
+async fn triage_classifies_the_description_and_widens_the_start_radius() {
+    let h = Harness::new(Harness::zero_grace()).with_triage();
+    // Three fresh users at 1 km and three more at 2 km.
+    for id in ["near-1", "near-2", "near-3", "far-1", "far-2", "far-3"] {
+        h.locations.save(106.9, -6.3, id).await.unwrap();
+    }
+    h.locations.rings.lock().unwrap().insert(
+        1000,
+        vec!["near-1".into(), "near-2".into(), "near-3".into()],
+    );
+    // Deliberately only the far ring here: if the code started at 1 km the
+    // near users would be picked and no recipient would come from 2 km.
+    h.locations
+        .rings
+        .lock()
+        .unwrap()
+        .insert(2000, vec!["far-1".into(), "far-2".into(), "far-3".into()]);
+
+    // "kecelakaan, teman saya pingsan" -> MEDICAL at 0.6, which starts the
+    // fan-out at the 2 km ring (index 1 of 3).
+    let request = TriggerSosRequest {
+        latitude: Some(-6.2),
+        longitude: Some(106.8),
+        description: "kecelakaan, teman saya pingsan".into(),
+        ..Default::default()
+    };
+    let created = h.case.trigger("sender", request, None).await.unwrap();
+
+    let triage = created.triage.expect("triage attached");
+    assert_eq!(triage.emergency_type, "MEDICAL");
+    assert!((triage.severity - 0.6).abs() < 1e-9);
+    assert!(!triage.summary.is_empty());
+
+    let alert = h
+        .alerts
+        .get_by_id(&created.alert_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(alert.emergency_type, "MEDICAL");
+    assert_eq!(alert.severity, Some(0.6));
+    assert!(alert.summary.is_some());
+
+    // The 2 km ring was searched first: the far users are recipients even
+    // though three fresh users sat inside 1 km.
+    let recipients = h.alerts.list_recipients(&created.alert_id).await.unwrap();
+    assert!(recipients.contains(&"far-1".to_string()));
+    assert!(!recipients.contains(&"near-1".to_string()));
+}
+
+#[tokio::test]
+async fn explicit_emergency_type_wins_over_triage_but_severity_still_applies() {
+    let h = Harness::new(Harness::zero_grace()).with_triage();
+    seed_ring(&h).await;
+
+    let request = TriggerSosRequest {
+        latitude: Some(-6.2),
+        longitude: Some(106.8),
+        emergency_type: "ACCIDENT".into(),
+        description: "kebakaran di rumah tetangga".into(),
+        ..Default::default()
+    };
+    let created = h.case.trigger("sender", request, None).await.unwrap();
+
+    let alert = h
+        .alerts
+        .get_by_id(&created.alert_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(alert.emergency_type, "ACCIDENT", "request type must win");
+    assert_eq!(alert.severity, Some(0.8), "triage severity still stored");
+}
+
+#[tokio::test]
+async fn no_description_means_no_triage() {
+    let h = Harness::new(Harness::zero_grace()).with_triage();
+    seed_ring(&h).await;
+
+    let created = h
+        .case
+        .trigger("sender", with_coords(-6.2, 106.8), None)
+        .await
+        .unwrap();
+    assert!(created.triage.is_none());
+    let alert = h
+        .alerts
+        .get_by_id(&created.alert_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(alert.severity.is_none());
+    assert_eq!(alert.emergency_type, "DANGER");
 }

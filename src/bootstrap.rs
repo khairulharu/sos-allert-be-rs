@@ -26,6 +26,7 @@ use crate::usecase::contact::ContactUseCase;
 use crate::usecase::emergency::EmergencyContactUseCase;
 use crate::usecase::location::LocationUseCase;
 use crate::usecase::sos::{SosSettings, SosUseCase};
+use crate::usecase::triage::OfflineClassifier;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -178,14 +179,27 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         config.sos.ws_max_per_ip,
         config.sos.ws_max_per_user,
     );
-    let sos = Arc::new(
-        SosUseCase::new(alerts, sos_settings)
-            .with_locations(Arc::new(RedisLocationCacheRepository::new(redis.clone())))
-            .with_idempotency(Arc::new(RedisIdempotencyRepository::new(redis.clone())))
-            .with_rate_limiter(Arc::new(RedisRateLimitRepository::new(redis.clone())))
-            .with_users(Arc::new(PgUserRepository::new(db.clone())))
-            .with_hub(hub.clone() as Arc<dyn crate::usecase::sos::TrackHub>),
-    );
+    let mut sos_case = SosUseCase::new(alerts, sos_settings)
+        .with_locations(Arc::new(RedisLocationCacheRepository::new(redis.clone())))
+        .with_idempotency(Arc::new(RedisIdempotencyRepository::new(redis.clone())))
+        .with_rate_limiter(Arc::new(RedisRateLimitRepository::new(redis.clone())))
+        .with_users(Arc::new(PgUserRepository::new(db.clone())))
+        .with_hub(hub.clone() as Arc<dyn crate::usecase::sos::TrackHub>);
+
+    // AI triage: only the deterministic offline classifier is ported so far.
+    // A configured remote provider still gets offline classification instead
+    // of silently losing triage.
+    if config.ai.enabled {
+        if !config.ai.provider.is_empty() && config.ai.provider != "offline" {
+            tracing::warn!(
+                provider = %config.ai.provider,
+                "remote AI provider not ported yet, using the offline classifier"
+            );
+        }
+        sos_case = sos_case.with_triage(Arc::new(OfflineClassifier));
+    }
+
+    let sos = Arc::new(sos_case);
 
     let rate_limiter = Arc::new(RedisRateLimitRepository::new(redis.clone()));
 

@@ -24,6 +24,8 @@ cargo test --all-targets
 - Never commit `config.json`, `ca.pem`, `*.p8`, or any key. `config.json.example`
   holds the full key set and stays in sync when keys change.
 - Do not disable or skip a failing test to make CI green.
+- The build uses `profile.debug = 0`: the machine's 16G disk cannot hold a
+  debuginfo build of this tree. Do not re-enable it without freeing space.
 
 ## Contract details that are easy to get wrong
 

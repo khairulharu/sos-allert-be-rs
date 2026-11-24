@@ -4,9 +4,11 @@ Rust port of [khairulharu/sos-allert-be](https://github.com/khairulharu/sos-alle
 (the Go service), with the database moved from MySQL to **Postgres**. Same clean
 architecture, same HTTP contract, same SOS semantics.
 
-Status: **phases 0-2** (skeleton, auth/users, contacts/addresses/location,
-emergency contacts). SOS core, media/push, the Kafka worker and AI triage are
-still to come; see [docs/PORT-PLAN.md](docs/PORT-PLAN.md).
+Status: **phases 0-3** and the offline part of phase 6 (auth/users,
+contacts/addresses/location, emergency contacts, SOS trigger + lifecycle +
+breadcrumbs + history/summary, WebSocket tracking, offline triage). Media/push,
+the Kafka worker, remote AI providers and STT are still to come; see
+[docs/PORT-PLAN.md](docs/PORT-PLAN.md).
 
 ## Stack
 

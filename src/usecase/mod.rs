@@ -20,6 +20,8 @@ pub mod contact;
 pub mod emergency;
 pub mod location;
 pub mod sos;
+pub mod triage;
+mod triage_keywords;
 
 #[cfg(test)]
 mod tests;
