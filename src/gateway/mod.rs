@@ -4,4 +4,5 @@
 //! able to fake: the Go `TriggerSOSUseCase` took `Notifier`/`EventPublisher`
 //! interfaces, and the same boundary is kept here.
 
+pub mod kafka;
 pub mod publisher;

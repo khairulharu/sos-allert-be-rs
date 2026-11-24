@@ -649,6 +649,20 @@ struct Harness {
 
 impl Harness {
     fn new(settings: SosSettings) -> Self {
+        Self::with_optional_publisher(settings, None)
+    }
+
+    fn with_publisher(
+        settings: SosSettings,
+        publisher: Arc<dyn crate::gateway::publisher::EventPublisher>,
+    ) -> Self {
+        Self::with_optional_publisher(settings, Some(publisher))
+    }
+
+    fn with_optional_publisher(
+        settings: SosSettings,
+        publisher: Option<Arc<dyn crate::gateway::publisher::EventPublisher>>,
+    ) -> Self {
         let alerts = Arc::new(FakeAlerts::default());
         let locations = Arc::new(FakeLocations::default());
         let idempotency = Arc::new(FakeIdempotency::default());
@@ -665,7 +679,7 @@ impl Harness {
         limiter_default = true;
         *limiter.allow.lock().unwrap() = limiter_default;
 
-        let case = SosUseCase::new(alerts.clone() as Arc<dyn AlertStore>, settings)
+        let mut case = SosUseCase::new(alerts.clone() as Arc<dyn AlertStore>, settings)
             .with_locations(locations.clone() as Arc<dyn SosLocationStore>)
             .with_idempotency(idempotency.clone() as Arc<dyn SosIdempotency>)
             .with_rate_limiter(limiter.clone() as Arc<dyn SosRateLimiter>)
@@ -673,6 +687,9 @@ impl Harness {
             .with_hub(hub.clone() as Arc<dyn TrackHub>)
             .with_users(users.clone() as Arc<dyn UserStore>)
             .with_clock(Arc::new(|| NOW));
+        if let Some(publisher) = publisher {
+            case = case.with_publisher(publisher);
+        }
 
         Self {
             case,
@@ -1568,4 +1585,63 @@ fn media_filenames_are_sanitized_like_go() {
     let sanitized = sanitize_filename(&long).unwrap();
     assert_eq!(sanitized.chars().count(), 200);
     assert!(sanitized.ends_with(".wav"), "got {sanitized}");
+}
+
+#[derive(Default)]
+struct RecordingPublisher {
+    sent: Mutex<Vec<(String, Vec<u8>)>>,
+}
+
+#[async_trait]
+impl crate::gateway::publisher::EventPublisher for RecordingPublisher {
+    async fn publish(
+        &self,
+        topic: &str,
+        key: &[u8],
+        payload: &[u8],
+        _headers: &[(String, String)],
+    ) -> AppResult<()> {
+        let _ = key;
+        self.sent
+            .lock()
+            .unwrap()
+            .push((topic.to_owned(), payload.to_vec()));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_configured_publisher_owns_the_fan_out() {
+    let publisher = Arc::new(RecordingPublisher::default());
+    let harness = Harness::with_publisher(
+        Harness::zero_grace(),
+        publisher.clone() as Arc<dyn crate::gateway::publisher::EventPublisher>,
+    );
+    seed_ring(&harness).await;
+
+    let created = harness
+        .case
+        .trigger("sender", with_coords(-6.2, 106.8), None)
+        .await
+        .unwrap();
+
+    let sent = publisher.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1, "exactly one SOS event");
+    assert_eq!(sent[0].0, crate::model::events::topics::SOS_DISPATCHED);
+
+    let event: serde_json::Value = serde_json::from_slice(&sent[0].1).unwrap();
+    assert_eq!(event["alert_id"], created.alert_id);
+    assert_eq!(event["event_type"], "sos.dispatched");
+    assert_eq!(event["recipients"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        event["push_only"],
+        serde_json::Value::Null,
+        "normal dispatch"
+    );
+
+    // The worker owns the fan-out: no local notify.
+    assert!(
+        harness.notifier.calls.lock().unwrap().is_empty(),
+        "publishing must replace the local notify"
+    );
 }

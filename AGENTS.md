@@ -62,6 +62,21 @@ export TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/sos_rs
 export TEST_REDIS_URL=redis://127.0.0.1:56379
 ```
 
+## Kafka locally
+
+`rdkafka` needs cmake and a broker. On this machine both are user-space:
+
+```bash
+export PATH="$HOME/.local/cmake-venv/bin:$PATH"     # cmake for cmake-build
+# Kafka 3.9.1 KRaft in /tmp/opencode/kafka, config /tmp/opencode/kraft.properties
+/tmp/opencode/kafka/bin/kafka-server-start.sh /tmp/opencode/kraft.properties &
+export TEST_KAFKA_BROKERS=127.0.0.1:9092
+```
+
+Only `sos.dispatched` has a dead-letter publisher (it needs
+`kafka.producer.enabled: true`); the entity topics drop after their retries,
+exactly like the Go worker.
+
 ## Tests
 
 - Unit tests live in `src/<module>/tests.rs`, declared with

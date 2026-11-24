@@ -26,10 +26,12 @@ clean architecture kept, tests kept out of logic files.
   change.
 - **bcrypt stays bcrypt** (`bcrypt` crate), not argon2, so existing hashes keep
   verifying.
-- **Kafka client: `rskafka`** (pure Rust). No librdkafka, no cmake, no C
-  toolchain surprises in CI. If throughput or consumer-group behaviour proves
-  insufficient at phase 5, that is a measured decision with numbers, not a
-  default.
+- **Kafka client: `rdkafka`** (librdkafka, built with `cmake-build`).
+  *Changed at phase 5:* `rskafka` has no consumer-group membership, and groups
+  are part of the contract (one group per entity topic, the legacy base group
+  for `sos.dispatched`, commits only after a message is handled or
+  dead-lettered). librdkafka needs cmake; CI installs it, and this machine has a
+  user-space cmake in a venv (`~/.local/cmake-venv`).
 - **Migrations keep the Go version numbers and filenames**, so the timeline can
   be compared one-to-one. `sqlx::migrate` tracks them in `_sqlx_migrations`
   (Go used `schema_migrations`); a fresh Postgres database starts clean.
@@ -149,14 +151,27 @@ because it compiles.
   notification path. `SosNotifier` is already a port, so the fan-out does not
   change when they land.
 
-### 5. Kafka worker
+### 5. Kafka worker (done)
 
 - Consumers for `users`/`contacts`/`addresses` (idempotent upserts) and
   `sos.dispatched` (legacy group id), retry-same-message, DLQ publish with
   `dlq.source.*` headers, offset only after success, failed DLQ leaves the
   offset uncommitted.
-- Acceptance: consumer tests against a fake broker abstraction; one integration
-  run against a real broker env-gated.
+- Done: producer (`sos.dispatched`, keyed by alert id) and four consumers wired
+  in the worker binary. Retry/DLQ semantics ported 1:1: retry the same message,
+  then republish to `kafka.dlq.topic` with the original payload/key plus
+  `dlq.source.topic|partition|offset|error`, commit only after success or a
+  successful DLQ write, and no commit when the DLQ write fails (the consumer
+  restarts and the group replays). Entity topics stay log-only, matching the Go
+  `// TODO process event` handlers; `sos.dispatched` routes normal events to
+  `notify` and `push_only` events to the push-only surface, bounded by a 10 s
+  timeout.
+- Verified against a real Kafka 3.9.1 (KRaft) broker: an event produced to
+  `sos.dispatched` reached the handler, an escalation event used the push-only
+  path, and a poison payload landed on the dead-letter topic with the source
+  headers. Also checked live: the web process published the trigger event and
+  the worker joined `sos-allert-rs`, `-users`, `-contacts`, `-addresses`.
+- Remaining: the worker's notifier is still the no-op (phase 4 push/SMS).
 
 ### 6. AI triage and STT (partial: offline classifier done)
 
@@ -195,6 +210,7 @@ installed user-space from Debian packages with `dpkg-deb -x`:
 # Redis 8.0.2 on 127.0.0.1:56379
 export TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/sos_rs
 export TEST_REDIS_URL=redis://127.0.0.1:56379
+export TEST_KAFKA_BROKERS=127.0.0.1:9092   # Kafka 3.9 KRaft, for the worker test
 cargo test --all-targets
 ```
 

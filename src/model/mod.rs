@@ -5,6 +5,7 @@
 //! `skip_serializing_if` here.
 
 pub mod contact;
+pub mod events;
 pub mod location;
 pub mod sos;
 

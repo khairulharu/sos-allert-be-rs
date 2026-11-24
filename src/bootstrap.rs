@@ -8,6 +8,8 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
 use crate::config::Config;
+use crate::gateway::kafka::KafkaPublisher;
+use crate::gateway::publisher::EventPublisher;
 use crate::repository::address_repository::PgAddressRepository;
 use crate::repository::alert_repository::PgAlertRepository;
 use crate::repository::contact_repository::PgContactRepository;
@@ -189,6 +191,20 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         .with_storage(Arc::new(LocalStorage::new(
             config.storage.local_dir.clone(),
         )));
+
+    // Kafka fan-out: when the producer is enabled the web process publishes
+    // and the worker notifies; otherwise the trigger notifies directly.
+    if config.kafka.producer.enabled {
+        match KafkaPublisher::new(&config.kafka.bootstrap.servers, Duration::from_secs(10)) {
+            Ok(publisher) => {
+                tracing::info!("kafka producer enabled: the worker owns the fan-out");
+                sos_case = sos_case.with_publisher(Arc::new(publisher) as Arc<dyn EventPublisher>);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "kafka producer unavailable, notifying directly")
+            }
+        }
+    }
 
     // AI triage: only the deterministic offline classifier is ported so far.
     // A configured remote provider still gets offline classification instead
