@@ -41,6 +41,7 @@ return {1, 0}
 "#;
 
 const SOS_RATE_LIMIT_PREFIX: &str = "ratelimit:sos:";
+const CLASSIFY_RATE_LIMIT_PREFIX: &str = "ratelimit:classify:";
 
 const RATE_LIMIT_SCRIPT: &str = r#"
 local key = KEYS[1]
@@ -103,6 +104,30 @@ impl RedisRateLimitRepository {
 }
 
 impl RedisRateLimitRepository {
+    /// Per-user paid STT/LLM call limit. The middleware fails **closed** on a
+    /// store error: every call costs provider tokens.
+    pub async fn allow_classify(
+        &self,
+        user_id: &str,
+        limit: u32,
+        window: Duration,
+    ) -> AppResult<bool> {
+        let now = now_millis();
+        let member = format!("{now}-{}", now_nanos());
+        let mut conn = self.redis.conn().await?;
+        let script = redis::Script::new(RATE_LIMIT_SCRIPT);
+        let allowed: i64 = script
+            .key(format!("{CLASSIFY_RATE_LIMIT_PREFIX}{user_id}"))
+            .arg(now)
+            .arg(window.as_millis() as i64)
+            .arg(limit as i64)
+            .arg(member)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| AppError::Unavailable(format!("redis classify rate limit: {e}")))?;
+        Ok(allowed == 1)
+    }
+
     /// Per-user SOS trigger limit: `limit` per window, sliding.
     pub async fn allow_sos(&self, user_id: &str, limit: u32, window: Duration) -> AppResult<bool> {
         let now = now_millis();

@@ -46,6 +46,10 @@ pub enum AppError {
     #[error("{message}")]
     TooManyRequests { message: String, retry_after_s: u64 },
 
+    /// An upstream provider failed (`502`), e.g. the STT service.
+    #[error("{0}")]
+    Upstream(String),
+
     /// Storage or upstream failure (`500`), or Redis outage (`503`).
     #[error("{0}")]
     Unavailable(String),
@@ -79,6 +83,7 @@ impl AppError {
             AppError::Precondition(_) => 412,
             AppError::Conflict(_) => 409,
             AppError::TooManyRequests { .. } => 429,
+            AppError::Upstream(_) => 502,
             AppError::Unavailable(_) => 503,
             AppError::Sqlx(_) | AppError::Redis(_) | AppError::Json(_) | AppError::Io(_) => 500,
             AppError::Internal(_) => 500,

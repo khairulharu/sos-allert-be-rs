@@ -95,6 +95,22 @@ hosts, and an entry starting with `.` matches a subdomain suffix). A stored
 endpoint is re-checked against that list at send time. `404`/`410` from the push
 service deletes the subscription.
 
+## AI triage and STT
+
+`ai.enabled` builds the chain from `ai.provider`: `jev` -> (openai when
+`ai.openai.api_key` is set) -> offline, `openai` -> offline, `ollama` ->
+offline, anything else -> offline only. Every provider validates its answer
+strictly (known type, score present, 0..1) and a bad answer falls through.
+Jev's `choice` confidence floor is 0.5.
+
+`ai.stt.enabled` wires the OpenAI-compatible `/audio/transcriptions` client
+(Groq by default). Silence is detected from `no_speech_prob`,
+`compression_ratio`, `avg_logprob`, clip duration and the stock subtitle
+phrases — never report a silent clip as a transcript.
+
+`POST /api/sos/classify` is rate limited per user and **fails closed** (503) on
+a limiter error: it spends provider tokens unlike the SOS trigger.
+
 ## Tests
 
 - Unit tests live in `src/<module>/tests.rs`, declared with

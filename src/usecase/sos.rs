@@ -28,13 +28,15 @@ use crate::model::events::{topics, SosEvent};
 use crate::model::sos::{
     responder_metrics, AlertDetailResponse, AlertMediaResponse, AlertNotice, AlertRespondedCounts,
     AlertStatusCounts, AlertSummaryResponse, BreadcrumbRequest, BreadcrumbResponse,
-    CancelSosRequest, CancelSosResponse, LocationPoint, RespondSosRequest, RespondSosResponse,
-    ResponderSummary, SearchAlertHistoryRequest, SenderSummary, SosCreatedResponse, TriageInfo,
-    TriggerSosRequest,
+    CancelSosRequest, CancelSosResponse, ClassifyResponse, LocationPoint, RespondSosRequest,
+    RespondSosResponse, ResponderSummary, SearchAlertHistoryRequest, SenderSummary,
+    SosCreatedResponse, TriageInfo, TriggerSosRequest,
 };
 use crate::storage::MediaStorage;
 use crate::usecase::auth::UserStore;
-use crate::usecase::triage::{radius_start_index, Triage};
+use crate::usecase::classify_store::PendingClassify;
+use crate::usecase::stt::{Transcriber, Transcript};
+use crate::usecase::triage::{radius_start_index, Triage, TriageResult};
 
 /// Stale after 2 minutes, the same cutoff used for nearby and fan-out.
 pub const STALE_THRESHOLD_MS: i64 = 2 * 60 * 1000;
@@ -44,6 +46,8 @@ pub const MAX_HISTORY_PAGE: i64 = 100_000;
 pub const ACTIVE_LIST_LIMIT: i64 = 20;
 /// Upload limit for incident media.
 pub const MAX_MEDIA_BYTES: usize = 50 << 20;
+/// Groq's free tier: 25 MB (decimal), the transcription cutoff.
+pub const MAX_TRANSCRIPTION_BYTES: usize = 25_000_000;
 
 /// Fields a transition may set. `None` leaves the column untouched.
 #[derive(Debug, Clone, Default)]
@@ -232,6 +236,8 @@ pub struct SosUseCase {
     triage: Option<Arc<dyn Triage>>,
     storage: Option<Arc<dyn MediaStorage>>,
     publisher: Option<Arc<dyn EventPublisher>>,
+    transcriber: Option<Arc<dyn Transcriber>>,
+    classify: Option<Arc<dyn PendingClassify>>,
     settings: SosSettings,
     now_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
@@ -249,6 +255,8 @@ impl SosUseCase {
             triage: None,
             storage: None,
             publisher: None,
+            transcriber: None,
+            classify: None,
             settings,
             now_millis: Arc::new(crate::usecase::auth::default_now_millis),
         }
@@ -302,6 +310,19 @@ impl SosUseCase {
     /// `kafka.producer.enabled: true`.
     pub fn with_publisher(mut self, publisher: Arc<dyn EventPublisher>) -> Self {
         self.publisher = Some(publisher);
+        self
+    }
+
+    /// STT provider; without it, audio uploads are stored un-transcribed and
+    /// `/api/sos/classify` answers 503.
+    pub fn with_transcriber(mut self, transcriber: Arc<dyn Transcriber>) -> Self {
+        self.transcriber = Some(transcriber);
+        self
+    }
+
+    /// Single-use handoff from `/api/sos/classify` to the next trigger.
+    pub fn with_classify_store(mut self, store: Arc<dyn PendingClassify>) -> Self {
+        self.classify = Some(store);
         self
     }
 
@@ -416,8 +437,27 @@ impl SosUseCase {
 
         // Optional triage. Fail-open: a provider error keeps the request
         // defaults, because a life-safety alert never waits on AI.
-        let triage = match &self.triage {
-            Some(engine) if !request.description.trim().is_empty() => {
+        // A pending audio classification (POST /api/sos/classify) wins: it is
+        // server-computed and consumed once, so a client cannot claim its way
+        // to a wider fan-out.
+        let pending = match &self.classify {
+            Some(store) => match store.take(sender_id).await {
+                Ok(info) => info,
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not read the pending audio triage");
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let triage = match (pending, &self.triage) {
+            (Some(info), _) => TriageResult {
+                emergency_type: info.emergency_type,
+                severity: info.severity,
+                summary: info.summary,
+            },
+            (None, Some(engine)) if !request.description.trim().is_empty() => {
                 engine.triage(&request.description).await
             }
             _ => Default::default(),
@@ -1282,7 +1322,8 @@ impl SosUseCase {
     // ------------------------------------------------------------------ media
 
     /// `POST /api/sos/{alertId}/media`. Sender only, active alert only,
-    /// audio or video only, at most 50 MB.
+    /// audio or video only, at most 50 MB. Audio up to 25 MB is transcribed
+    /// and triaged; a wider classification escalates the fan-out.
     pub async fn upload_media(
         &self,
         sender_id: &str,
@@ -1319,10 +1360,14 @@ impl SosUseCase {
             .as_ref()
             .ok_or_else(|| AppError::Precondition("media storage is not configured".into()))?;
 
+        // The severity before this clip decides whether the audio escalates.
+        let previous_severity = alert.severity;
+        let is_audio = content_type.starts_with("audio/");
+
         let stored_name = format!("{alert_id}_{}_{}", Uuid::new_v4(), filename);
         let path = storage.save(&stored_name, bytes).await?;
 
-        let media = AlertMedia {
+        let mut media = AlertMedia {
             id: Uuid::new_v4().to_string(),
             alert_id: alert_id.to_owned(),
             filename: filename.clone(),
@@ -1332,10 +1377,40 @@ impl SosUseCase {
             uploaded_by: sender_id.to_owned(),
             uploaded_at: (self.now_millis)(),
             transcript: None,
-            // STT is not ported yet.
-            transcription_status: "disabled".into(),
+            transcription_status: if is_audio {
+                "pending".to_string()
+            } else {
+                "disabled".to_string()
+            },
             transcribed_at: None,
         };
+
+        // STT is fail-open: a provider failure keeps the media row and only
+        // marks the transcription as failed.
+        let mut triage: Option<TriageInfo> = None;
+        if is_audio && bytes.len() <= MAX_TRANSCRIPTION_BYTES {
+            if let Some(transcriber) = &self.transcriber {
+                match transcriber.transcribe(&filename, content_type, bytes).await {
+                    Ok(Transcript::Text(text)) => {
+                        media.transcription_status = "completed".into();
+                        media.transcript = Some(text.clone());
+                        media.transcribed_at = Some((self.now_millis)());
+                        triage = self.triage_transcript(&text).await;
+                    }
+                    Ok(Transcript::Empty) => {
+                        media.transcription_status = "empty".into();
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, alert_id, "audio transcription failed");
+                        media.transcription_status = "failed".into();
+                    }
+                }
+            } else {
+                media.transcription_status = "disabled".into();
+            }
+        } else if is_audio {
+            media.transcription_status = "too_large".into();
+        }
 
         if let Err(e) = self.alerts.create_media(&media).await {
             // Undo the file: a row-less blob would never be reachable.
@@ -1343,7 +1418,208 @@ impl SosUseCase {
             return Err(e);
         }
 
-        Ok(media_response(&media))
+        let mut recipients_added = 0;
+        if let Some(info) = &triage {
+            if let Err(e) = self
+                .alerts
+                .update_triage(
+                    alert_id,
+                    &info.emergency_type,
+                    Some(info.severity),
+                    &info.summary,
+                )
+                .await
+            {
+                tracing::warn!(error = %e, alert_id, "could not persist the audio triage");
+            }
+            self.publish_triage(alert_id, info);
+            match self.escalate_fanout(&alert, info, previous_severity).await {
+                Ok(added) => recipients_added = added,
+                Err(e) => tracing::warn!(error = %e, alert_id, "escalation failed"),
+            }
+        }
+
+        let mut response = media_response(&media);
+        response.triage = triage;
+        response.escalated = recipients_added > 0;
+        response.recipients_added = recipients_added;
+        Ok(response)
+    }
+
+    /// `POST /api/sos/classify`: transcribe + classify a clip without
+    /// persisting anything. The result labels the next trigger of this user
+    /// through the single-use store, never through a client-supplied number.
+    pub async fn classify_audio(
+        &self,
+        sender_id: &str,
+        filename: &str,
+        content_type: &str,
+        audio: &[u8],
+    ) -> AppResult<ClassifyResponse> {
+        if !content_type.starts_with("audio/") {
+            return Err(AppError::BadRequest("audio is required".into()));
+        }
+        if audio.len() > MAX_TRANSCRIPTION_BYTES {
+            return Err(AppError::BadRequest(
+                "audio exceeds the 25 MB transcription limit".into(),
+            ));
+        }
+        let Some(transcriber) = &self.transcriber else {
+            return Err(AppError::Unavailable(
+                "audio transcription is not configured".into(),
+            ));
+        };
+
+        let transcript = match transcriber.transcribe(filename, content_type, audio).await {
+            Ok(Transcript::Empty) => {
+                // A silent clip is a normal outcome, not a provider error.
+                return Ok(ClassifyResponse {
+                    transcription_status: "empty".into(),
+                    ..Default::default()
+                });
+            }
+            Ok(Transcript::Text(text)) => text,
+            Err(e) => {
+                tracing::warn!(error = %e, "classify transcription failed");
+                return Err(AppError::Upstream("audio transcription failed".into()));
+            }
+        };
+
+        let mut response = ClassifyResponse {
+            transcript: transcript.clone(),
+            transcription_status: "completed".into(),
+            ..Default::default()
+        };
+
+        if let Some(info) = self.triage_transcript(&transcript).await {
+            let info = TriageInfo {
+                severity: info.severity.clamp(0.0, 1.0),
+                ..info
+            };
+            response.emergency_type = info.emergency_type.clone();
+            response.severity = info.severity;
+            response.summary = info.summary.clone();
+            if let Some(store) = &self.classify {
+                if let Err(e) = store.save(sender_id, &info).await {
+                    tracing::warn!(error = %e, "could not store the pending audio triage");
+                }
+            }
+        }
+
+        Ok(response)
+    }
+
+    /// Classify a transcript. No signal leaves the alert's existing
+    /// classification intact.
+    async fn triage_transcript(&self, transcript: &str) -> Option<TriageInfo> {
+        let engine = self.triage.as_ref()?;
+        let result = engine.triage(transcript).await;
+        if !result.is_signal() {
+            return None;
+        }
+        Some(TriageInfo {
+            emergency_type: result.emergency_type,
+            severity: result.severity.clamp(0.0, 1.0),
+            summary: result.summary,
+        })
+    }
+
+    /// Widen the fan-out when the audio raised the incident level. Only
+    /// responders not already recorded are notified; with a grace period the
+    /// recipients are recorded and the outbox notifies them when it fires.
+    async fn escalate_fanout(
+        &self,
+        alert: &Alert,
+        info: &TriageInfo,
+        previous_severity: Option<f64>,
+    ) -> AppResult<usize> {
+        let radii = self.settings.radii.len();
+        let old_start = previous_severity
+            .map(|severity| radius_start_index(severity, radii))
+            .unwrap_or(0);
+        let new_start = radius_start_index(info.severity, radii);
+        if new_start <= old_start {
+            return Ok(0);
+        }
+
+        let already: HashSet<String> = self
+            .alerts
+            .list_recipients(&alert.id)
+            .await?
+            .into_iter()
+            .collect();
+
+        let (wider, _) = self
+            .find_recipients(&alert.sender_id, alert.longitude, alert.latitude, new_start)
+            .await?;
+        let added: Vec<String> = wider
+            .into_iter()
+            .filter(|id| !already.contains(id))
+            .collect();
+        if added.is_empty() {
+            return Ok(0);
+        }
+
+        let now = (self.now_millis)();
+        if let Err(e) = self.alerts.create_recipients(&alert.id, &added, now).await {
+            tracing::warn!(error = %e, "could not record escalated recipients");
+        }
+
+        // Still inside the grace window: the outbox re-scans and notifies
+        // everyone recorded, so nothing is sent twice.
+        if let Some(due) = alert.dispatch_due_at {
+            if alert.dispatched_at.is_none() && due > now {
+                return Ok(added.len());
+            }
+        }
+
+        let escalated = AlertNotice::from(alert);
+        if let Some(publisher) = &self.publisher {
+            let event = SosEvent {
+                event_type: "sos.dispatched".into(),
+                alert_id: alert.id.clone(),
+                sender_id: alert.sender_id.clone(),
+                latitude: alert.latitude,
+                longitude: alert.longitude,
+                emergency_type: info.emergency_type.clone(),
+                status: alert.status.clone(),
+                recipients: added.clone(),
+                triggered_at: alert.triggered_at,
+                severity: info.severity,
+                summary: info.summary.clone(),
+                client_severity: None,
+                client_summary: String::new(),
+                // The consumer must not text the emergency contacts again.
+                push_only: true,
+            };
+            if let Ok(payload) = serde_json::to_vec(&event) {
+                if publisher
+                    .publish(topics::SOS_DISPATCHED, alert.id.as_bytes(), &payload, &[])
+                    .await
+                    .is_ok()
+                {
+                    return Ok(added.len());
+                }
+                tracing::warn!(alert_id = %alert.id, "kafka publish failed for escalation");
+            }
+        }
+
+        if let Err(e) = self.notifier.notify_recipients(&added, &escalated).await {
+            tracing::error!(error = %e, alert_id = %alert.id, "escalated notify failed");
+        }
+        Ok(added.len())
+    }
+
+    fn publish_triage(&self, alert_id: &str, info: &TriageInfo) {
+        let payload = serde_json::json!({
+            "type": "ALERT_TRIAGE",
+            "alert_id": alert_id,
+            "emergency_type": info.emergency_type,
+            "severity": info.severity,
+            "summary": info.summary,
+            "updated_at": (self.now_millis)(),
+        });
+        self.hub.publish(alert_id, payload.to_string().into_bytes());
     }
 
     pub async fn list_media(
@@ -1632,6 +1908,9 @@ fn media_response(media: &AlertMedia) -> AlertMediaResponse {
         transcript: media.transcript.clone().unwrap_or_default(),
         transcription_status: status,
         transcribed_at: media.transcribed_at,
+        triage: None,
+        escalated: false,
+        recipients_added: 0,
     }
 }
 

@@ -29,12 +29,16 @@ use crate::storage::LocalStorage;
 use crate::tracking::Hub;
 use crate::usecase::address::AddressUseCase;
 use crate::usecase::auth::{AuthUseCase, SessionStore};
+use crate::usecase::classify_store::RedisClassifyStore;
 use crate::usecase::contact::ContactUseCase;
 use crate::usecase::emergency::EmergencyContactUseCase;
 use crate::usecase::location::LocationUseCase;
 use crate::usecase::push::PushUseCase;
 use crate::usecase::sos::{SosSettings, SosUseCase};
-use crate::usecase::triage::OfflineClassifier;
+use crate::usecase::stt::WhisperTranscriber;
+use crate::usecase::triage::{
+    AiTriage, JevClient, OfflineClassifier, OllamaClient, OpenAiClient, Triage,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -223,18 +227,42 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
         }
     }
 
-    // AI triage: only the deterministic offline classifier is ported so far.
-    // A configured remote provider still gets offline classification instead
-    // of silently losing triage.
+    // Triage chain: the configured live provider (if any), then the offline
+    // keyword classifier. Fail-open by construction: a dead provider just
+    // means the next stage answers.
     if config.ai.enabled {
-        if !config.ai.provider.is_empty() && config.ai.provider != "offline" {
-            tracing::warn!(
-                provider = %config.ai.provider,
-                "remote AI provider not ported yet, using the offline classifier"
-            );
+        let timeout = config.ai.timeout_seconds.max(1);
+        let mut chain: Vec<Arc<dyn Triage>> = Vec::new();
+        match config.ai.provider.as_str() {
+            "jev" => {
+                chain.push(Arc::new(JevClient::new(&config.ai.jev, timeout)));
+                if !config.ai.openai.api_key.is_empty() {
+                    chain.push(Arc::new(OpenAiClient::new(&config.ai.openai, timeout)));
+                }
+            }
+            "openai" => chain.push(Arc::new(OpenAiClient::new(&config.ai.openai, timeout))),
+            "ollama" => chain.push(Arc::new(OllamaClient::new(&config.ai.ollama, timeout))),
+            _ => {}
         }
-        sos_case = sos_case.with_triage(Arc::new(OfflineClassifier));
+        chain.push(Arc::new(OfflineClassifier));
+        tracing::info!(
+            provider = %config.ai.provider,
+            stages = chain.len(),
+            "triage chain configured"
+        );
+        sos_case = sos_case.with_triage(Arc::new(AiTriage::new(chain)));
     }
+
+    // STT is optional: without it audio is stored untranscribed and
+    // /api/sos/classify answers 503.
+    if config.ai.stt.enabled {
+        tracing::info!(provider = %config.ai.stt.provider, model = %config.ai.stt.model, "STT configured");
+        sos_case = sos_case.with_transcriber(Arc::new(WhisperTranscriber::new(&config.ai.stt)));
+    }
+    sos_case = sos_case.with_classify_store(Arc::new(RedisClassifyStore::new(
+        redis.clone(),
+        Duration::from_secs(120),
+    )));
 
     // Notification providers. Unconfigured channels stay log-only instead of
     // failing the trigger.

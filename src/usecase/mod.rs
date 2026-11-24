@@ -16,11 +16,13 @@
 
 pub mod address;
 pub mod auth;
+pub mod classify_store;
 pub mod contact;
 pub mod emergency;
 pub mod location;
 pub mod push;
 pub mod sos;
+pub mod stt;
 pub mod triage;
 mod triage_keywords;
 
