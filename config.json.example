@@ -17,6 +17,7 @@
     "host": "127.0.0.1",
     "port": 5432,
     "name": "postgres",
+    "sslmode": "require",
     "pool": {
       "idle": 10,
       "max": 100,
@@ -27,7 +28,8 @@
     "addr": "127.0.0.1:6379",
     "user": "",
     "pass": "",
-    "db": 0
+    "db": 0,
+    "tls": false
   },
   "kafka": {
     "bootstrap": {

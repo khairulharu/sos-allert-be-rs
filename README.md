@@ -34,6 +34,35 @@ cargo run --bin worker                 # kafka consumers (phase 5)
 `CONFIG_PATH=/path/to/config.json` overrides the search path
 (`./config.json`, then `../config.json`).
 
+### Hosted Postgres (Supabase) and Redis Cloud
+
+Supabase is plain Postgres behind TLS, so only the `database` block changes:
+
+```json
+"database": {
+  "username": "postgres",
+  "password": "<project password>",
+  "host": "db.<project-ref>.supabase.co",
+  "port": 5432,
+  "name": "postgres",
+  "sslmode": "require",
+  "pool": { "idle": 2, "max": 10, "lifetime": 300 }
+}
+```
+
+Run `cargo run --bin web -- migrate` against a **direct or session-pooler**
+connection, never the transaction pooler on `6543`: sqlx uses prepared
+statements and that mode does not support them. Direct connections are
+IPv6-only unless the project has the IPv4 add-on.
+
+Redis Cloud endpoints are often TLS-only. If the endpoint requires
+`redis-cli --tls`, set `redis.tls` to `true` so the client opens `rediss://`;
+endpoints that accept plaintext keep it `false`. Fill `redis.addr`,
+`redis.user` (the ACL user, usually `default`), and `redis.pass` either way.
+
+Kafka is optional. With `kafka.producer.enabled` false (the default) the web
+process notifies directly, and the `worker` binary is not needed.
+
 ## Check
 
 ```bash
