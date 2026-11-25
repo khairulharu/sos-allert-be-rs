@@ -165,6 +165,7 @@ fn cors_layer() -> CorsLayer {
 
     CorsLayer::new()
         .allow_origin(AllowOrigin::list([
+            "https://sos.allert.my.id".parse().expect("origin"),
             "https://allert.my.id".parse().expect("origin"),
             "http://localhost:5173".parse().expect("origin"),
         ]))
