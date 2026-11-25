@@ -170,6 +170,8 @@ pub struct RedisConfig {
     pub user: String,
     pub pass: String,
     pub db: i64,
+    /// Open a `rediss://` connection. Redis Cloud only accepts TLS.
+    pub tls: bool,
 }
 
 impl Default for RedisConfig {
@@ -179,18 +181,21 @@ impl Default for RedisConfig {
             user: String::new(),
             pass: String::new(),
             db: 0,
+            tls: false,
         }
     }
 }
 
 impl RedisConfig {
-    /// Redis URL, redacted credentials are added only when set.
+    /// Redis URL. Credentials are embedded only when set; `tls` selects the
+    /// `rediss://` scheme that hosted providers such as Redis Cloud require.
     pub fn url(&self) -> String {
+        let scheme = if self.tls { "rediss" } else { "redis" };
         if self.user.is_empty() && self.pass.is_empty() {
-            format!("redis://{}/{}", self.addr, self.db)
+            format!("{scheme}://{}/{}", self.addr, self.db)
         } else {
             format!(
-                "redis://{}:{}@{}/{}",
+                "{scheme}://{}:{}@{}/{}",
                 urlencode(&self.user),
                 urlencode(&self.pass),
                 self.addr,
@@ -627,3 +632,6 @@ pub fn explain_search_paths() -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+
+#[cfg(test)]
+mod tests;
