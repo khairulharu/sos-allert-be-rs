@@ -86,6 +86,14 @@ and continues instead of failing the trigger. APNs reads
 `403 TooManyProviderTokenUpdates`. Provider request shapes are asserted against
 a local mock server in `src/gateway/notify/tests.rs`.
 
+## Proxy header trust
+
+`web.proxy_header` is only believed when the direct peer is listed in
+`web.trusted_proxies` (exact address or CIDR). The header is parsed from the
+right, skipping trusted hops, so a client-supplied prefix cannot pick its own
+rate-limit bucket. An empty `web.trusted_proxies` means the header is ignored
+and the limiter keys on the peer address — never fall back to trusting it.
+
 ## HTTP middleware
 
 The router applies, outermost first: panic guard, the two helmet headers, CORS,
