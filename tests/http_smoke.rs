@@ -261,3 +261,47 @@ async fn helmet_headers_are_present() {
         Some("cross-origin")
     );
 }
+
+#[tokio::test]
+async fn every_response_carries_nosniff() {
+    let app = router(test_state());
+
+    let ok = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(
+        ok.headers()
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff"),
+        "a 200 must carry nosniff"
+    );
+
+    // Error responses too, not just the happy path.
+    let unauthorized = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/users/_current")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        unauthorized
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff"),
+        "a 401 must carry nosniff"
+    );
+}
