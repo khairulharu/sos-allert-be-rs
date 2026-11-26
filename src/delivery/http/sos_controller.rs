@@ -259,15 +259,33 @@ pub async fn download_media(
         StatusCode::OK,
         [
             ("content-type", media.content_type.clone()),
-            (
-                "content-disposition",
-                format!("inline; filename=\"{}\"", media.filename),
-            ),
+            ("content-disposition", attachment_header(&media.filename)),
         ],
         bytes,
     )
         .into_response())
 }
+
+/// `attachment; filename="..."` with the name reduced to a header-safe ASCII
+/// basename: the upload filename is attacker-controlled, and a quote or a
+/// semicolon would otherwise break the header syntax.
+pub fn attachment_header(filename: &str) -> String {
+    let base = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
+    let safe: String = base
+        .chars()
+        .filter(|ch| ch.is_ascii() && !ch.is_ascii_control() && !matches!(ch, '"' | ';' | '\\'))
+        .collect();
+    let safe = safe.trim();
+    let safe = if safe.is_empty() || safe == "." || safe == ".." {
+        "download"
+    } else {
+        safe
+    };
+    format!("attachment; filename=\"{safe}\"")
+}
+
+#[cfg(test)]
+mod tests;
 
 /// `POST /api/sos/classify` (multipart, field `file`). Throttled by the
 /// classify limiter and mounted separately from the other SOS routes.

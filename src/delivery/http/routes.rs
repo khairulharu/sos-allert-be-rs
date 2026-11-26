@@ -154,6 +154,11 @@ pub fn router(state: AppState) -> Router {
             axum::http::HeaderName::from_static("cross-origin-resource-policy"),
             axum::http::HeaderValue::from_static("cross-origin"),
         ))
+        // Stops a browser from re-interpreting a stored media type.
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::X_CONTENT_TYPE_OPTIONS,
+            axum::http::HeaderValue::from_static("nosniff"),
+        ))
         .layer(CatchPanicLayer::new())
 }
 
