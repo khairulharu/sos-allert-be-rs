@@ -1,0 +1,10 @@
+[advisories]
+# Both entries are in Cargo.lock but are never compiled: a lock file is
+# feature-agnostic, so sqlx's optional MySQL/SQLite drivers are resolved even
+# though this crate enables only `postgres`. `cargo tree -i rsa` and
+# `cargo tree -i libsqlite3-sys` print nothing for this target.
+#
+# RUSTSEC-2023-0071 (rsa): pulled in by sqlx-mysql (not built). The service
+# signs ES256 only (APNs, VAPID) with p256.
+# RUSTSEC-2026-0459 (libsqlite3-sys): pulled in by sqlx-sqlite (not built).
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0459"]

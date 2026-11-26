@@ -422,3 +422,164 @@ fn the_worker_payload_points_at_the_inbox() {
     assert_eq!(json["data"]["url"], "/");
     assert_eq!(json["data"]["alert_id"], "alert-1");
 }
+
+// ---------------------------------------------------------------------------
+// RFC 8291 round trip: decrypt with the receiver's private key, independently
+// of the notifier's code path.
+// ---------------------------------------------------------------------------
+
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::Aes128Gcm;
+use base64::Engine;
+use hkdf::Hkdf;
+use p256::ecdsa::signature::Verifier;
+use p256::ecdsa::{Signature, VerifyingKey};
+use p256::elliptic_curve::sec1::Sec1Point;
+use p256::{PublicKey, SecretKey};
+use sha2::Sha256;
+
+fn b64(data: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
+}
+
+fn unb64(text: &str) -> Vec<u8> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(text)
+        .unwrap()
+}
+
+fn uncompressed(public: &PublicKey) -> Vec<u8> {
+    Sec1Point::<p256::NistP256>::from(*public)
+        .as_bytes()
+        .to_vec()
+}
+
+fn random_secret() -> SecretKey {
+    for _ in 0..16 {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes).unwrap();
+        if let Ok(secret) = SecretKey::from_slice(&bytes) {
+            return secret;
+        }
+    }
+    panic!("cannot generate a P-256 key");
+}
+
+/// Receiver side of RFC 8291 for a single record.
+fn decrypt(body: &[u8], ua_secret: &SecretKey, auth_secret: &[u8], ua_public: &[u8]) -> Vec<u8> {
+    // Body layout: salt(16) | rs(4) | idlen(1) | keyid | ciphertext.
+    let salt = &body[..16];
+    let idlen = body[20] as usize;
+    assert_eq!(idlen, 65, "keyid must be the uncompressed sender key");
+    let as_public = &body[21..21 + idlen];
+    let ciphertext = &body[21 + idlen..];
+
+    let sender_public = PublicKey::from_sec1_bytes(as_public).unwrap();
+    let shared =
+        p256::ecdh::diffie_hellman(ua_secret.to_nonzero_scalar(), sender_public.as_affine());
+
+    let mut auth_info = Vec::new();
+    auth_info.extend_from_slice(b"WebPush: info\0");
+    auth_info.extend_from_slice(ua_public);
+    auth_info.extend_from_slice(as_public);
+    let mut ikm = [0_u8; 32];
+    Hkdf::<Sha256>::new(Some(auth_secret), shared.raw_secret_bytes())
+        .expand(&auth_info, &mut ikm)
+        .unwrap();
+
+    let hkdf = Hkdf::<Sha256>::new(Some(salt), &ikm);
+    let mut cek = [0_u8; 16];
+    hkdf.expand(b"Content-Encoding: aes128gcm\0", &mut cek)
+        .unwrap();
+    let mut nonce = [0_u8; 12];
+    hkdf.expand(b"Content-Encoding: nonce\0", &mut nonce)
+        .unwrap();
+
+    let cipher = Aes128Gcm::new_from_slice(&cek).unwrap();
+    let nonce_ref = aes_gcm::Nonce::from(nonce);
+    let mut plaintext = cipher.decrypt(&nonce_ref, ciphertext).unwrap();
+    assert_eq!(plaintext.pop(), Some(0x02), "last-record delimiter");
+    plaintext
+}
+
+#[tokio::test]
+async fn the_ciphertext_round_trips_with_the_receiver_key() {
+    let ua_secret = random_secret();
+    let ua_public = uncompressed(&ua_secret.public_key());
+    let mut auth_secret = [0_u8; 16];
+    getrandom::fill(&mut auth_secret).unwrap();
+
+    let subs = Arc::new(FakeSubs::default());
+    subs.rows.lock().unwrap().push(PushSubscription {
+        id: "sub-1".into(),
+        user_id: "r1".into(),
+        endpoint: "https://fcm.googleapis.com/fcm/send/abc".into(),
+        p256dh: b64(&ua_public),
+        auth: b64(&auth_secret),
+        user_agent: None,
+        created_at: 1,
+        updated_at: 1,
+    });
+    let transport = FakeTransport::new(201);
+    let notifier = WebPushNotifier::new(&webpush_config(), subs as Arc<dyn PushSubscriptionStore>)
+        .with_transport(transport.clone());
+
+    let mut data = HashMap::new();
+    data.insert("alert_id".into(), "alert-1".into());
+    notifier
+        .send_to_user("r1", "SOS Alert", "help", &data)
+        .await
+        .unwrap();
+
+    let captured = transport.captured.lock().unwrap();
+    let plaintext = decrypt(&captured[0].body, &ua_secret, &auth_secret, &ua_public);
+    let json: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
+    assert_eq!(json["title"], "SOS Alert");
+    assert_eq!(json["body"], "help");
+    assert_eq!(json["data"]["alert_id"], "alert-1");
+    assert_eq!(json["data"]["url"], "/");
+}
+
+#[test]
+fn the_vapid_jwt_is_a_verifiable_es256_token() {
+    let notifier = WebPushNotifier::new(&webpush_config(), Arc::new(FakeSubs::default()));
+    let endpoint = "https://fcm.googleapis.com/fcm/send/abc";
+    let token = notifier.vapid_token(endpoint).unwrap();
+
+    let parts: Vec<&str> = token.split('.').collect();
+    assert_eq!(parts.len(), 3, "JWT must have three parts");
+
+    let header: serde_json::Value = serde_json::from_slice(&unb64(parts[0])).unwrap();
+    assert_eq!(header["alg"], "ES256");
+    assert_eq!(header["typ"], "JWT");
+
+    let claims: serde_json::Value = serde_json::from_slice(&unb64(parts[1])).unwrap();
+    assert_eq!(claims["aud"], "https://fcm.googleapis.com");
+    assert_eq!(claims["sub"], "mailto:sos@example.com");
+    let expires = claims["exp"].as_i64().unwrap();
+    assert!(expires > 0, "exp must be set");
+
+    // The signature verifies with the configured public key.
+    let public = PublicKey::from_sec1_bytes(&unb64(VAPID_PUBLIC)).unwrap();
+    let verifying = VerifyingKey::from(public);
+    let signature = Signature::from_slice(&unb64(parts[2])).unwrap();
+    verifying
+        .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
+        .expect("vapid signature must verify");
+
+    // Any change to the signing input must not verify.
+    let mut tampered = format!("{}.{}", parts[0], parts[1]);
+    tampered.push('A');
+    assert!(verifying.verify(tampered.as_bytes(), &signature).is_err());
+}
+
+#[test]
+fn the_authorization_header_pairs_the_token_with_the_public_key() {
+    let notifier = WebPushNotifier::new(&webpush_config(), Arc::new(FakeSubs::default()));
+    let header = notifier
+        .vapid_authorization("https://fcm.googleapis.com/fcm/send/abc")
+        .unwrap();
+    assert!(header.starts_with("vapid t="), "{header}");
+    assert!(header.contains(", k="), "{header}");
+    assert!(header.contains(VAPID_PUBLIC), "{header}");
+}

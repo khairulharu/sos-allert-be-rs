@@ -22,3 +22,15 @@ jobs:
       # tests run against unreachable ports on purpose.
       - name: test
         run: cargo test --all-targets
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: audit
+        # .cargo/audit.toml carries the one acknowledged, not-built advisory.
+        run: cargo audit

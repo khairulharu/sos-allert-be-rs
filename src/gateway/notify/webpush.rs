@@ -1,22 +1,38 @@
 //! VAPID Web Push (`webpush_notifier.go`, RFC 8291/8292).
 //!
-//! Encryption and the VAPID JWT come from the `web-push` crate; the HTTP send
-//! goes through a small [`PushTransport`] so tests can assert the endpoint,
-//! headers and ciphertext without TLS or a live push service.
+//! The message encryption and the VAPID JWT are implemented here with `p256` +
+//! `aes-gcm` + `hkdf` instead of the `web-push` crate: that crate pulls
+//! `jwt-simple` → `p256 0.13` → `crypto-bigint 0.5`, which carries a
+//! timing-variability advisory on exactly the signing path we use.
+//!
+//! The HTTP send goes through a small [`PushTransport`] so tests can assert the
+//! endpoint, headers and ciphertext without TLS or a live push service.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use web_push::{
-    ContentEncoding, SubscriptionInfo, Urgency, VapidSignatureBuilder, WebPushMessageBuilder,
-};
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::Aes128Gcm;
+use base64::Engine;
+use hkdf::Hkdf;
+use p256::ecdsa::signature::Signer;
+use p256::ecdsa::{Signature, SigningKey};
+use p256::elliptic_curve::sec1::Sec1Point;
+use p256::{PublicKey, SecretKey};
+use sha2::Sha256;
 
 use crate::config::WebPushConfig;
 use crate::error::AppResult;
 use crate::usecase::push::{hosts_or, is_allowed_endpoint, PushSubscriptionStore};
 
 use super::{http_client, ProviderError, ProviderResult};
+
+/// VAPID tokens are valid for 12 hours (the RFC caps them at 24).
+pub const VAPID_TTL_SECONDS: i64 = 12 * 3600;
+/// RFC 8188 record size for the single record we send.
+const RECORD_SIZE: u32 = 4096;
+/// Uncompressed P-256 point length.
+const UNCOMPRESSED_POINT_LEN: usize = 65;
 
 /// What a service worker's `push` handler receives.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -27,7 +43,7 @@ pub struct WebPushPayload {
 }
 
 /// One HTTP POST to a push service. Swappable for tests.
-#[async_trait]
+#[async_trait::async_trait]
 pub trait PushTransport: Send + Sync {
     /// Returns the HTTP status; an error means the request never completed.
     async fn send(
@@ -56,7 +72,7 @@ impl ReqwestTransport {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl PushTransport for ReqwestTransport {
     async fn send(
         &self,
@@ -209,51 +225,130 @@ impl WebPushNotifier {
         auth: &str,
         payload: &[u8],
     ) -> Result<u16, ProviderError> {
-        let info = SubscriptionInfo::new(endpoint, p256dh, auth);
+        let body = self.encrypt(p256dh, auth, payload)?;
+        let authorization = self.vapid_authorization(endpoint)?;
 
-        let mut builder = WebPushMessageBuilder::new(&info);
-        builder.set_ttl(self.ttl_seconds);
-        builder.set_urgency(Urgency::High);
-        builder.set_payload(ContentEncoding::Aes128Gcm, payload);
-
-        let signature = VapidSignatureBuilder::from_base64_no_sub(&self.vapid_private_key)
-            .map_err(|e| ProviderError::Failed(format!("vapid key: {e}")))?
-            .add_sub_info(&info)
-            .build()
-            .map_err(|e| ProviderError::Failed(format!("vapid signature: {e}")))?;
-        builder.set_vapid_signature(signature);
-
-        let message = builder
-            .build()
-            .map_err(|e| ProviderError::Failed(format!("web push build: {e}")))?;
-
-        let Some(payload) = message.payload else {
-            return Err(ProviderError::Failed("web push payload missing".into()));
-        };
-
-        let mut headers: Vec<(String, String)> = vec![
-            ("TTL".into(), message.ttl.to_string()),
-            ("Urgency".into(), "high".into()),
-            ("Content-Type".into(), "application/octet-stream".into()),
+        let headers = vec![
+            ("TTL".to_string(), self.ttl_seconds.to_string()),
+            ("Urgency".to_string(), "high".to_string()),
+            (
+                "Content-Type".to_string(),
+                "application/octet-stream".to_string(),
+            ),
+            ("Content-Encoding".to_string(), "aes128gcm".to_string()),
+            ("Authorization".to_string(), authorization),
         ];
-        if let Some(content_encoding) = Some(payload.content_encoding) {
-            headers.push((
-                "Content-Encoding".into(),
-                match content_encoding {
-                    ContentEncoding::Aes128Gcm => "aes128gcm",
-                    ContentEncoding::AesGcm => "aesgcm",
-                }
-                .to_string(),
-            ));
-        }
-        for (name, value) in payload.crypto_headers {
-            headers.push((name.to_string(), value));
-        }
 
         self.transport
-            .send(&message.endpoint.to_string(), headers, payload.content)
+            .send(endpoint, headers, body)
             .await
             .map_err(ProviderError::Failed)
+    }
+
+    /// RFC 8188 `aes128gcm` body for one record:
+    /// `salt(16) | rs(4) | idlen(1) | keyid(as_public 65) | ciphertext`.
+    pub fn encrypt(
+        &self,
+        p256dh: &str,
+        auth: &str,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, ProviderError> {
+        let ua_public_bytes = decode_b64url(p256dh)?;
+        let ua_public = PublicKey::from_sec1_bytes(&ua_public_bytes)
+            .map_err(|e| ProviderError::Failed(format!("subscription key: {e}")))?;
+        let auth_secret = decode_b64url(auth)?;
+
+        let as_secret = random_secret()?;
+        let as_public = uncompressed(&as_secret.public_key());
+
+        let shared =
+            p256::ecdh::diffie_hellman(as_secret.to_nonzero_scalar(), ua_public.as_affine());
+
+        // RFC 8291 §3.4: ikm = HKDF(auth_secret, ecdh, "WebPush: info\0" || ua || as)
+        let mut auth_info = Vec::with_capacity(14 + ua_public_bytes.len() + as_public.len());
+        auth_info.extend_from_slice(b"WebPush: info\0");
+        auth_info.extend_from_slice(&ua_public_bytes);
+        auth_info.extend_from_slice(&as_public);
+
+        let auth_hkdf = Hkdf::<Sha256>::new(Some(&auth_secret), shared.raw_secret_bytes());
+        let mut ikm = [0_u8; 32];
+        auth_hkdf
+            .expand(&auth_info, &mut ikm)
+            .map_err(|_| ProviderError::Failed("web push ikm".into()))?;
+
+        let salt = random_array::<16>()?;
+        let hkdf = Hkdf::<Sha256>::new(Some(&salt), &ikm);
+        let mut cek = [0_u8; 16];
+        hkdf.expand(b"Content-Encoding: aes128gcm\0", &mut cek)
+            .map_err(|_| ProviderError::Failed("web push cek".into()))?;
+        let mut nonce = [0_u8; 12];
+        hkdf.expand(b"Content-Encoding: nonce\0", &mut nonce)
+            .map_err(|_| ProviderError::Failed("web push nonce".into()))?;
+
+        let cipher = Aes128Gcm::new_from_slice(&cek)
+            .map_err(|_| ProviderError::Failed("web push cipher".into()))?;
+        let mut plaintext = payload.to_vec();
+        // 0x02 marks the last (only) record.
+        plaintext.push(0x02);
+        let nonce_ref = aes_gcm::Nonce::from(nonce);
+        let ciphertext = cipher
+            .encrypt(&nonce_ref, plaintext.as_ref())
+            .map_err(|_| ProviderError::Failed("web push encrypt".into()))?;
+
+        let mut body = Vec::with_capacity(16 + 4 + 1 + UNCOMPRESSED_POINT_LEN + ciphertext.len());
+        body.extend_from_slice(&salt);
+        body.extend_from_slice(&RECORD_SIZE.to_be_bytes());
+        body.push(UNCOMPRESSED_POINT_LEN as u8);
+        body.extend_from_slice(&as_public);
+        body.extend_from_slice(&ciphertext);
+        Ok(body)
+    }
+
+    /// `vapid t=<jwt>, k=<public key>` for one push service origin.
+    pub fn vapid_authorization(&self, endpoint: &str) -> Result<String, ProviderError> {
+        let authorization = self.vapid_token(endpoint)?;
+        let key = if self.vapid_public_key.is_empty() {
+            let secret = decode_b64url(&self.vapid_private_key)?;
+            let secret = SecretKey::from_slice(&secret)
+                .map_err(|e| ProviderError::Failed(format!("vapid key: {e}")))?;
+            encode_b64url(&uncompressed(&secret.public_key()))
+        } else {
+            self.vapid_public_key.clone()
+        };
+        Ok(format!("vapid t={authorization}, k={key}"))
+    }
+
+    /// ES256 JWT with `aud` (the push service origin), `exp` and `sub`.
+    pub fn vapid_token(&self, endpoint: &str) -> Result<String, ProviderError> {
+        let audience = endpoint_origin(endpoint)?;
+        let subject = if self.subscriber.starts_with("mailto:") {
+            self.subscriber.clone()
+        } else {
+            format!("mailto:{}", self.subscriber)
+        };
+        let expires = now_unix() + VAPID_TTL_SECONDS;
+
+        let header = serde_json::json!({"typ": "JWT", "alg": "ES256"});
+        let claims = serde_json::json!({
+            "aud": audience,
+            "exp": expires,
+            "sub": subject,
+        });
+        let signing_input = format!(
+            "{}.{}",
+            encode_b64url(header.to_string().as_bytes()),
+            encode_b64url(claims.to_string().as_bytes())
+        );
+
+        let secret = decode_b64url(&self.vapid_private_key)?;
+        let signing_key = SigningKey::from_slice(&secret)
+            .map_err(|e| ProviderError::Failed(format!("vapid key: {e}")))?;
+        let signature: Signature = signing_key.sign(signing_input.as_bytes());
+
+        Ok(format!(
+            "{signing_input}.{}",
+            encode_b64url(&signature.to_bytes())
+        ))
     }
 
     /// Contact for the VAPID `sub` claim (`webpush.subscriber`).
@@ -271,8 +366,61 @@ impl std::fmt::Debug for WebPushNotifier {
     }
 }
 
-/// Keeps the trait object usable from the dispatcher.
 pub type SharedWebPush = Arc<WebPushNotifier>;
+
+fn encode_b64url(data: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
+}
+
+fn decode_b64url(text: &str) -> Result<Vec<u8>, ProviderError> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(text.trim())
+        .map_err(|e| ProviderError::Failed(format!("web push key: {e}")))
+}
+
+fn random_array<const N: usize>() -> Result<[u8; N], ProviderError> {
+    let mut bytes = [0_u8; N];
+    getrandom::fill(&mut bytes).map_err(|e| ProviderError::Failed(format!("random: {e}")))?;
+    Ok(bytes)
+}
+
+fn random_secret() -> Result<SecretKey, ProviderError> {
+    // A random 32-byte string is not always a valid scalar; retry.
+    for _ in 0..8 {
+        let bytes = random_array::<32>()?;
+        if let Ok(secret) = SecretKey::from_slice(&bytes) {
+            return Ok(secret);
+        }
+    }
+    Err(ProviderError::Failed("cannot generate a P-256 key".into()))
+}
+
+/// Uncompressed SEC1 point (`0x04 || x || y`), which is what a browser's
+/// subscription uses.
+fn uncompressed(public: &PublicKey) -> Vec<u8> {
+    Sec1Point::<p256::NistP256>::from(*public)
+        .as_bytes()
+        .to_vec()
+}
+
+fn endpoint_origin(endpoint: &str) -> Result<String, ProviderError> {
+    let url = reqwest::Url::parse(endpoint)
+        .map_err(|e| ProviderError::Failed(format!("push endpoint: {e}")))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| ProviderError::Failed("push endpoint has no host".into()))?;
+    Ok(match url.port() {
+        Some(port) => format!("{}://{}:{}", url.scheme(), host, port),
+        None => format!("{}://{}", url.scheme(), host),
+    })
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 #[allow(dead_code)]
 fn _app_result(_r: AppResult<()>) {}
