@@ -19,12 +19,16 @@ name = "worker"
 path = "src/bin/worker.rs"
 
 [dependencies]
+aes-gcm = "0.11.1"
 anyhow = "1.0.105"
 async-trait = "0.1.92"
 axum = { version = "0.8.9", features = ["ws", "macros", "multipart"] }
+base64 = "0.23.1"
 bcrypt = "0.19.3"
 futures = "0.3.34"
-jsonwebtoken = { version = "10.3.0", features = ["use_pem", "rust_crypto"] }
+getrandom = "0.4.3"
+hkdf = "0.13.0"
+p256 = { version = "0.14.0", features = ["ecdsa", "ecdh", "arithmetic", "pkcs8", "pem"] }
 rdkafka = { version = "0.40.0", features = ["cmake-build", "ssl", "tokio"] }
 redis = { version = "1.2.2", features = [
   "tokio-comp",
@@ -35,6 +39,7 @@ redis = { version = "1.2.2", features = [
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form", "multipart"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11.0"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "json", "macros"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
@@ -44,7 +49,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1.26.1", features = ["v4"] }
 validator = { version = "0.20.0", features = ["derive"] }
-web-push = { version = "0.11.0", default-features = false }
 
 [dev-dependencies]
 bcrypt = "0.19.3"

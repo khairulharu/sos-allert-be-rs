@@ -9,6 +9,11 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
+use p256::ecdsa::signature::Signer;
+use p256::ecdsa::{Signature, SigningKey};
+use p256::pkcs8::DecodePrivateKey;
+
 use serde_json::json;
 
 use crate::config::ApnsConfig;
@@ -67,29 +72,35 @@ impl ApnsNotifier {
             && !self.private_key_pem.is_empty()
     }
 
-    /// ES256 provider token: `{alg: ES256, kid}` / `{iss, iat, exp}`.
-    pub fn build_jwt(&self, now: Instant) -> ProviderResult<String> {
-        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    /// ES256 provider token: `{alg: ES256, kid}` / `{iss, iat, exp}`,
+    /// signed directly with the .p8 key so no JWT library (and no RSA code)
+    /// is compiled into the service.
+    pub fn build_jwt(&self) -> ProviderResult<String> {
+        let pem = std::str::from_utf8(&self.private_key_pem)
+            .map_err(|_| ProviderError::Failed("apns key is not UTF-8 PEM".into()))?;
+        let secret = p256::SecretKey::from_pkcs8_pem(pem)
+            .map_err(|e| ProviderError::Failed(format!("apns key: {e}")))?;
+        let signing_key = SigningKey::from(&secret);
 
-        // `Instant` has no wall clock; the claims only need a consistent pair.
         let issued = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0) as i64;
-        let _ = now;
 
-        let mut header = Header::new(Algorithm::ES256);
-        header.kid = Some(self.key_id.clone());
-
+        let header = json!({ "alg": "ES256", "kid": self.key_id, "typ": "JWT" });
         let claims = json!({
             "iss": self.team_id,
             "iat": issued,
             "exp": issued + 3600,
         });
 
-        let key = EncodingKey::from_ec_pem(&self.private_key_pem)
-            .map_err(|e| ProviderError::Failed(format!("apns key: {e}")))?;
-        encode(&header, &claims, &key).map_err(|e| ProviderError::Failed(format!("apns jwt: {e}")))
+        let signing_input = format!(
+            "{}.{}",
+            b64url(header.to_string().as_bytes()),
+            b64url(claims.to_string().as_bytes())
+        );
+        let signature: Signature = signing_key.sign(signing_input.as_bytes());
+        Ok(format!("{signing_input}.{}", b64url(&signature.to_bytes())))
     }
 
     /// Cached provider token; minted again only after [`PROVIDER_TOKEN_TTL`].
@@ -101,7 +112,7 @@ impl ApnsNotifier {
                 return Ok(token.clone());
             }
         }
-        let token = self.build_jwt(now)?;
+        let token = self.build_jwt()?;
         *cache = Some((token.clone(), now));
         Ok(token)
     }
@@ -152,4 +163,8 @@ impl ApnsNotifier {
             response_snippet(response).await
         )))
     }
+}
+
+fn b64url(data: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
 }

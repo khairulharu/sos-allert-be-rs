@@ -377,11 +377,20 @@ async fn run_sos_loops(
     }
 }
 
+/// The embedded migration set (reversible `.up.sql`/`.down.sql` pairs).
+///
+/// The runtime `Migrator::new(dir)` is deliberately not used: it treats every
+/// `.sql` file as its own migration, so it would apply the `.down.sql` files as
+/// steps too.
+pub fn embedded_migrator() -> sqlx::migrate::Migrator {
+    sqlx::migrate!("./migrations")
+}
+
 /// Apply pending migrations. Called by an explicit subcommand, never on boot:
 /// DDL against a live database needs a human.
 pub async fn migrate(db: &PgPool) -> anyhow::Result<()> {
-    sqlx::migrate!("./migrations")
-        .run(db)
-        .await
-        .context("run migrations")
+    embedded_migrator().run(db).await.context("run migrations")
 }
+
+#[cfg(test)]
+mod tests;
