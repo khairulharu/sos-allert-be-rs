@@ -159,6 +159,13 @@ pub fn build_state(config: Config) -> anyhow::Result<AppState> {
             .with_publisher(redis_sessions),
     );
 
+    if !config.web.proxy_header.is_empty() && config.web.trusted_proxies.is_empty() {
+        tracing::warn!(
+            header = %config.web.proxy_header,
+            "web.proxy_header is set but web.trusted_proxies is empty: the header is ignored for rate limiting, so every client is bucketed by the proxy address"
+        );
+    }
+
     let token_ttl =
         Duration::from_secs(config.auth.token_ttl_hours_or_default().max(1) as u64 * 3600);
     let auth = Arc::new(AuthUseCase::new(
